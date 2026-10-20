@@ -865,7 +865,7 @@ fn cli_waiter_sends_one_modern_request_with_optional_ack() {
             request.body["params"]["_meta"],
             json!({
                 "io.modelcontextprotocol/protocolVersion": ProtocolVersion::V_2026_07_28,
-                "io.modelcontextprotocol/clientInfo": {"name":"minymaton-wait","version":"0.1.0"},
+                "io.modelcontextprotocol/clientInfo": {"name":"minymaton-wait","version":env!("CARGO_PKG_VERSION")},
                 "io.modelcontextprotocol/clientCapabilities": {},
             })
         );
