@@ -2,6 +2,7 @@
   <img src="assets/logo.svg" alt="minymaton logo" width="300"/>
   <h1>minymaton</h1>
   <p><strong>A durable message queue that reaches AI agents through the tool list.</strong></p>
+  <p><a href="https://dl.scritty.dev/minymaton/">Downloads &amp; quick start</a> | <a href="deploy/README.md">Deployment guide</a></p>
 
   [![Rust](https://img.shields.io/badge/rust-1.98%2B-orange.svg)](https://www.rust-lang.org/)
   [![License](https://img.shields.io/badge/license-AGPL--3.0--only-green.svg)](LICENSE)
@@ -274,7 +275,7 @@ minymaton-wait --handle sub_... --url http://127.0.0.1:18990/mcp \
 Pre-built native `minymaton-wait-<target>` and standalone OSS SQLite
 `minymaton-server-<target>` binaries (`Linux x86_64/aarch64`,
 `macOS x86_64/aarch64`, `Windows x86_64/aarch64`) and `minymaton-wait.py` are
-also published at `https://dl.scritty.dev/minymaton/` alongside `SHA256SUMS`,
+also published on the [download page](https://dl.scritty.dev/minymaton/) alongside `SHA256SUMS`,
 `LICENSE`, and `source.tar.gz` (served from Cloudflare edge cache with
 per-client download rate limiting that returns plain HTTP `429` without browser
 or CAPTCHA challenges):
