@@ -12,7 +12,7 @@ keywords.workspace = true
 categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
-minymaton-core = { path = "../minymaton-core", version = "0.1.0" }
+minymaton-core = { path = "../minymaton-core", version = "0.1.1" }
 axum = "0.8"
 bytes = "1"
 futures = "0.3"

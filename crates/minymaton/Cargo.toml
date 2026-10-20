@@ -12,7 +12,7 @@ keywords.workspace = true
 categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
-minymaton-server = { path = "../minymaton-server", version = "0.1.0" }
+minymaton-server = { path = "../minymaton-server", version = "0.1.1" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [[bin]]
