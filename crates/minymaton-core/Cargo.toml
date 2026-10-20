@@ -1,0 +1,23 @@
+[package]
+name = "minymaton-core"
+version.workspace = true
+description = "The durable, event-driven queue behind minymaton's MCP message bus: receive waits, wake signals and a pluggable QueueStore/QueueReader backend with bundled SQLite"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+readme = "../../README.md"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["database", "asynchronous"]
+
+[dependencies]
+getrandom = "0.3"
+humantime = "2"
+rmcp = { version = "=3.1.4", default-features = false }
+rusqlite = { version = "0.37", features = ["bundled"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }

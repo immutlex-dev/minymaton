@@ -1,0 +1,8 @@
+[Unit]
+Description=Check minymaton filesystem capacity and report alert transitions
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/minymaton-storage-check --path %h/.local/share/minymaton/minymaton.sqlite3 --state %h/.local/state/minymaton/storage.json --webhook-file %h/.config/minymaton/webhook --host %H --minimum-free-percent 10
+TimeoutStartSec=120
+UMask=0077

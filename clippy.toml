@@ -1,0 +1,4 @@
+disallowed-methods = [
+    { path = "std::thread::sleep", reason = "wait for an event, not elapsed time" },
+    { path = "std::sync::mpsc::Receiver::recv_timeout", reason = "use a channel and explicit cancellation" },
+]

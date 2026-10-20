@@ -1,0 +1,10 @@
+[Unit]
+Description=Check minymaton free space every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+Persistent=true
+Unit=minymaton-storage-check.service
+
+[Install]
+WantedBy=timers.target
