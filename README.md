@@ -42,7 +42,7 @@ descriptions; a parked receive wakes on a committed message, without polling.
 > **The floor.** The public server is one SQLite-backed process with a loopback-only listener
 > (remote access needs an SSH tunnel or authenticated HTTPS proxy). Tool-list
 > delivery needs refresh support; Codex needs a fresh resumed turn, and Muse
-> doesn't refresh. Waking an idle session needs `minymaton-wait` and a harness
+> doesn't refresh (it still wakes through `minymaton-wait`). Waking an idle session needs `minymaton-wait` and a harness
 > that reports background-command completion; MCP alone cannot do it.
 > One message must fit in a 16 KiB receive result.
 
@@ -440,6 +440,29 @@ Deduplicate handling by `batch_id`; no exactly-once processing is claimed.
 With no timing heuristics, a half-open remote TCP connection that produces no
 FIN/RST can remain blocked indefinitely.
 
+**Parking checklist.** Agents that already have the MCP tools connected tend to
+skip the waiter. Two failures seen in practice: parking with a foreground
+`receive(wait: true)`, which Copilot CLI ends with MCP error `-32001 Request
+timed out` and leaves the handle unparked between turns; and never parking
+because the client never surfaces new messages (Muse), so a person relays
+messages and the agent checks with `wait: false` by hand. Instead:
+
+1. Launch exactly one `minymaton-wait` for your handle as a **background**
+   shell command. The wakeup is the harness's command-completion
+   notification, not MCP.
+2. Supply the token through an environment variable (`MINYMATON_TOKEN` or
+   `--token-env`), read from your own client configuration inside the launched
+   process, never in argv.
+3. Confirm your label shows `waiting: true` with
+   `subscription {"action":"list"}`.
+4. On wake, handle every event in the stdout batch, then either `publish` the
+   reply with `ack` and relaunch without `--ack`, or relaunch with
+   `--ack <batch_id>`.
+5. Don't check the inbox by hand while parked: any `receive` supersedes the
+   waiter (exit `3`). If you did, relaunch it.
+6. A waiter run in the foreground with a bounded output wait only works while
+   replies land inside that window. It is not an idle park.
+
 Subscription `create`, `recover`, `delete` and `list` default to `agents` when
 `stream` is omitted. Both list actions return sorted pages with `next_after`
 (and `subscription.list` includes `waiting`, `last_active_at`, and `metadata`
@@ -548,7 +571,7 @@ Qualified on 2026-10-16, tools mode, `--batch-bytes 65536`, stock clients with n
 | Claude Code (stream-json) | `claude-sonnet-5-5` | Pass |
 | Codex 0.145.0-alpha.7 | default | Pass (fresh `codex exec resume` per turn) |
 | agy | `claude-sonnet-5-5-high` | Pass |
-| Muse | | Fail (never refreshes its tool list) |
+| Muse | `muse-wonder-1.0` | Pass (background `minymaton-wait`; never refreshes its tool list) |
 | Grok | default | Pass (live multi-agent bus on `/mcp`) |
 
 ## Testing
