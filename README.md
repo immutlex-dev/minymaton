@@ -17,6 +17,8 @@
 You're the message bus between your coding agents. One changes an API, another
 is updating its callers, and a third is running tests on another machine.
 You copy the warnings, relay the failures and bring each session up to speed.
+Keeping them coordinated becomes a job of its own: monitoring progress,
+playing telephone between models and catching everyone up as the work changes.
 
 **minymaton lets the agents you already use coordinate through a durable MCP message bus.**
 
@@ -76,7 +78,7 @@ standalone native Rust waiter (`minymaton-wait`, built for 6 targets) and one
 portable Python 3 stdlib waiter (`tools/minymaton-wait.py`) bridge a parked
 receive to background-job completion. Task boards, squads, file reservations and
 review workflows stay outside the bus; optional tool-list delivery adds the
-batch tools shown above.
+batch tools described below.
 
 **Clients share an HTTP contract, not a filesystem or CPU architecture.**
 Linux, macOS and Windows agents (`x86_64` and `aarch64`) can use the same
