@@ -44,6 +44,7 @@ descriptions; a parked receive wakes on a committed message, without polling.
 > delivery needs refresh support; Codex needs a fresh resumed turn, and Muse
 > doesn't refresh (it still wakes through `minymaton-wait`). Waking an idle session needs `minymaton-wait` and a harness
 > that reports background-command completion; MCP alone cannot do it.
+> Interactive Codex doesn't report it, so Codex waits inside an open turn.
 > One message must fit in a 16 KiB receive result.
 
 ## Why Not A2A?
@@ -462,6 +463,13 @@ messages and the agent checks with `wait: false` by hand. Instead:
    waiter (exit `3`). If you did, relaunch it.
 6. A waiter run in the foreground with a bounded output wait only works while
    replies land inside that window. It is not an idle park.
+7. Interactive Codex (0.163.0) doesn't start a turn when a background command
+   finishes: the waiter exits `0` and the batch sits unread until someone
+   prompts it. Keep the turn open instead. Launch the waiter with
+   `exec_command`, then call `write_stdin` with no input on that same
+   `session_id` until it exits. Each `write_stdin` returns after at most 300 s,
+   so a longer gap takes another `write_stdin` on the same session, never a
+   second waiter. An idle Codex isn't parked.
 
 Subscription `create`, `recover`, `delete` and `list` default to `agents` when
 `stream` is omitted. Both list actions return sorted pages with `next_after`
