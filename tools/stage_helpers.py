@@ -22,7 +22,11 @@ BINARY_ARTIFACTS = [
     "minymaton-server-aarch64-pc-windows-msvc.exe",
 ]
 
-README_TXT = """minymaton OSS helper and standalone SQLite server distribution (https://dl.scritty.dev/minymaton/)
+README_TXT = """minymaton OSS helper and standalone SQLite server distribution
+
+Source: https://github.com/immutlex-dev/minymaton
+Packages: https://crates.io/crates/minymaton
+Full server and helper install: cargo install --locked minymaton-server
 
 License: GNU Affero General Public License v3.0 only (AGPL-3.0-only)
 

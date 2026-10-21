@@ -1,7 +1,7 @@
 # Minymaton Operator Deployment Guide
 
-This document describes how to deploy `minymaton-server`, monitor its storage,
-and stage the public helper distribution bundle.
+This document describes how to install `minymaton-server` and its helpers,
+deploy a shared server, and monitor its storage.
 
 ## Deployment Topologies
 
@@ -46,34 +46,25 @@ To serve clients that cannot use SSH, run a reverse proxy on the server host tha
 - **Authentication:** start the server with `--bearer-token-file` (only SHA-256 token digests are kept in memory).
 - **Long polls:** a parked `receive` holds its request open until a commit arrives, so the proxy and anything in front of it must not cut idle requests short.
 
-### 3. Public helper and server distribution (`https://dl.scritty.dev/minymaton/`)
+### 3. Install the public server and helpers
 
-`tools/stage_helpers.py` packages the complete `AGPL-3.0-only` public bundle served at `https://dl.scritty.dev/minymaton/`:
-
-- `minymaton-wait-x86_64-unknown-linux-gnu`
-- `minymaton-wait-aarch64-unknown-linux-gnu`
-- `minymaton-wait-x86_64-apple-darwin`
-- `minymaton-wait-aarch64-apple-darwin`
-- `minymaton-wait-x86_64-pc-windows-msvc.exe`
-- `minymaton-wait-aarch64-pc-windows-msvc.exe`
-- `minymaton-server-x86_64-unknown-linux-gnu`
-- `minymaton-server-aarch64-unknown-linux-gnu`
-- `minymaton-server-x86_64-apple-darwin`
-- `minymaton-server-aarch64-apple-darwin`
-- `minymaton-server-x86_64-pc-windows-msvc.exe`
-- `minymaton-server-aarch64-pc-windows-msvc.exe`
-- `minymaton-wait.py` (portable Python 3 stdlib-only waiter)
-- `source.tar.gz` (exact Git source archive corresponding to the staged binaries)
-- `LICENSE` (`AGPL-3.0-only`)
-- `README.txt`
-- `stage_helpers.py`
-- `SHA256SUMS`
-
-To stage a fresh bundle from a directory holding the 12 qualified binaries:
+The public `AGPL-3.0-only` SQLite packages are published on
+[crates.io](https://crates.io/crates/minymaton), with source and build
+instructions in [immutlex-dev/minymaton](https://github.com/immutlex-dev/minymaton).
+Install the server, waiter and storage checker together:
 
 ```sh
-python3 tools/stage_helpers.py --out-dir /path/to/helper-bundle --repo-root .
+cargo install --locked --version 0.1.1 minymaton-server
 ```
+
+This compiles for the host OS and architecture; see the root README for native
+build prerequisites. `cargo install minymaton` installs only the server under
+the shorter command name. The portable waiter remains available as
+[`tools/minymaton-wait.py`](../tools/minymaton-wait.py) in source.
+
+There is no separate hosted binary download site. Operators distributing their
+own qualified binaries can still use `tools/stage_helpers.py` to assemble a
+local bundle with corresponding source, license and checksums.
 
 ## Storage Architecture
 
