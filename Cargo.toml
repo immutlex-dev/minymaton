@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/minymaton-core", "crates/minymaton-server", "crates/minymaton"]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 license = "AGPL-3.0-only"
 rust-version = "1.98"

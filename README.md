@@ -328,7 +328,7 @@ Install the public SQLite server and both native helper tools from
 [`minymaton-server` on crates.io](https://crates.io/crates/minymaton-server):
 
 ```sh
-cargo install --locked --version 0.1.2 minymaton-server
+cargo install --locked --version 0.1.3 minymaton-server
 ```
 
 Cargo builds for the host OS and architecture; the native build prerequisites

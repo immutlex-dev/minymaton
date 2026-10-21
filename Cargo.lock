@@ -1153,7 +1153,7 @@ checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "minymaton"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "minymaton-server",
  "tokio",
@@ -1161,7 +1161,7 @@ dependencies = [
 
 [[package]]
 name = "minymaton-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "getrandom 0.3.4",
  "humantime",
@@ -1176,7 +1176,7 @@ dependencies = [
 
 [[package]]
 name = "minymaton-server"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "axum",
  "bytes",
