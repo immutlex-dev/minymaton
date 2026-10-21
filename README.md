@@ -116,9 +116,10 @@ cargo build --release
 Or install from crates.io: `cargo install minymaton` installs the server as
 `minymaton`, and `cargo install minymaton-server` installs `minymaton-server`,
 `minymaton-wait` and `minymaton-storage-check`. The workspace publishes three
-crates: `minymaton-core` (the queue and its storage backends),
-`minymaton-server` (the MCP server and its helpers) and `minymaton` (the
-installable server binary).
+crates: [`minymaton-core`](https://crates.io/crates/minymaton-core) (the queue and
+its storage backends), [`minymaton-server`](https://crates.io/crates/minymaton-server)
+(the MCP server and its helpers) and [`minymaton`](https://crates.io/crates/minymaton)
+(the installable server binary).
 
 Install Rust/rustup and uv first. The pinned toolchain is Rust 1.98.0, including
 `rustc-dev`, `rust-src`, `llvm-tools-preview`, Clippy and rustfmt as specified in
