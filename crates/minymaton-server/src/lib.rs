@@ -62,6 +62,7 @@ pub async fn run(arguments: impl IntoIterator<Item = String>) -> Result<(), Stri
     match queue
         .stream(
             serde_json::json!({"action": "create", "name": minymaton_core::api::DEFAULT_STREAM}),
+            None,
         )
         .await
     {

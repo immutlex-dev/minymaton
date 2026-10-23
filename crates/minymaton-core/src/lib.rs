@@ -5,6 +5,7 @@
 pub mod api;
 mod error;
 mod ids;
+mod policy;
 mod queue;
 mod signals;
 mod store;
@@ -12,6 +13,7 @@ mod wire;
 
 pub use error::{ErrorCode, ToolError};
 pub use ids::{INBOX_PREFIX, inbox_uri};
+pub use policy::Membership;
 pub use queue::{Admitted, Delivery, Inbox, Queue, Waiter};
 pub use store::{
     Admission, Batch, Bounds, Publication, Published, QueueReader, QueueStore, Reader, Selection,

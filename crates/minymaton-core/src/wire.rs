@@ -103,13 +103,15 @@ pub(crate) fn widest_batch_bytes(
     wire_bytes(&crate::json(&result), &widest_id(id), true)
 }
 
-/// The size a result carrying only this payload can reach on any delivery.
-pub(crate) fn widest_single_event_bytes(payload: &Value) -> u64 {
+/// The size a result carrying only this payload, from this publisher, can
+/// reach on any delivery.
+pub(crate) fn widest_single_event_bytes(payload: &Value, publisher: Option<&str>) -> u64 {
     let event = EventEnvelope {
         message_id: sample_id(MESSAGE_PREFIX),
         sequence: u64::MAX,
         published_at: SAMPLE_TIMESTAMP.to_owned(),
         payload: payload.clone(),
+        publisher: publisher.map(str::to_owned),
     };
     widest_batch_bytes(
         &sample_id(BATCH_PREFIX),

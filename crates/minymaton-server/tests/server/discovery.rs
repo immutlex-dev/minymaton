@@ -14,8 +14,8 @@ async fn action_schemas_are_flat_and_requests_remain_strict() {
     for (name, actions, fields) in [
         (
             "stream",
-            json!(["create", "list"]),
-            vec!["action", "name", "after", "limit"],
+            json!(["create", "grant", "revoke", "list"]),
+            vec!["action", "name", "members", "caller", "after", "limit"],
         ),
         (
             "subscription",

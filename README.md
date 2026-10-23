@@ -329,7 +329,7 @@ Install the public SQLite server and both native helper tools from
 [`minymaton-server` on crates.io](https://crates.io/crates/minymaton-server):
 
 ```sh
-cargo install --locked --version 0.1.4 minymaton-server
+cargo install --locked --version 0.1.5 minymaton-server
 ```
 
 Cargo builds for the host OS and architecture; the native build prerequisites
@@ -491,6 +491,36 @@ bundled backend) and does not advance delivery.
 
 That endpoint lists one more tool, `follow`. The agent calls `follow {"stream": "reviews"}`, and from then on its tool list carries the pending batch of `reviews` through subscription `reviewer`, in whatever `--delivery` the server runs. The stream and subscription are created if missing; an unbound subscription already claimed by another client is not taken. Following another stream replaces the binding, re-following an earlier stream resumes the agent's own subscription on it, and the binding survives a restart. Other agents' commits and acks don't notify this agent's list.
 
+## Jobs and Knowledge Asks
+
+You have five agents connected and a GitHub issue nobody has picked up. Or you need past project work for a deck and the answer sits in someone else's notes. Asking around channel by channel takes longer than the work.
+
+**Ask the bus once; only agents with something to offer answer.**
+
+```text
+lead    -> agents:  {"kind":"ask","task":"Fix flaky receive test","ref":"issues/12"}
+agent-2 -> lead:    {"kind":"offer","ask":"msg_7f3...","why":"wrote that test"}
+agent-4 -> lead:    {"kind":"offer","ask":"msg_7f3..."}
+lead    -> agent-2: {"kind":"award","ask":"msg_7f3..."}
+lead    -> agent-4: {"kind":"decline","ask":"msg_7f3..."}
+agent-2 -> lead:    {"kind":"done","ask":"msg_7f3...","result":"PR #13"}
+```
+
+A knowledge ask is the same broadcast with `answer` replies. Each agent searches its own sources and stays silent without a hit, so nobody gets pinged for nothing. Agents get their owner's OK before offering or sharing; the server's `initialize` instructions teach every connected agent these kinds and that rule.
+
+**Claims.** Without a lead deciding, an agent takes the job by publishing its offer with `claims` set to the ask's `message_id` (and `from` set). First claim commits; every later one fails with `already_claimed`, naming the winner's label and claim message, and commits nothing, its `ack` included. A claim survives restarts.
+
+```
+publish  {"stream":"agents","idempotency_key":"w2-claim","from":"agent-2","claims":"msg_7f3...","payload":{"kind":"offer","ask":"msg_7f3..."}}
+```
+
+**Private streams.** With `--bearer-token-file`, each token's caller name is an identity. `stream` `create` with `members` makes a stream only those callers and the creator can use; any member can `grant` or `revoke` a caller, and the last member can't be revoked. Everyone else gets `stream_forbidden` on every call, including receives on a handle they already hold, and `stream` `list` doesn't show them the stream. Without bearer auth, creating one fails with `private_stream_needs_auth`. Every received event carries `publisher`, the authenticated caller that sent it, whatever `from` says.
+
+```
+stream  {"action":"create","name":"past-projects","members":["zach","dana"]}
+stream  {"action":"grant","name":"past-projects","caller":"lee"}
+```
+
 ## Tools
 
 `stream` and `subscription` advertise flat object input schemas with an
@@ -508,9 +538,9 @@ not make it optional for every action.
 
 | Tool | What it does |
 |---|---|
-| `stream` | Create or list streams. Messages keep commit order |
+| `stream` | Create or list the streams you may use. `create` with `members` makes a private stream; `grant` and `revoke` change its members. Messages keep commit order |
 | `subscription` | Create, recover, delete or list subscriptions in a stream. Omit the label on creation to atomically claim `agent-N` (optional `start_at: "latest" \| "earliest"` and `metadata`) |
-| `publish` | Commit one message, any JSON value, with optional `from` (suppresses self-echo), `to` (direct recipient), and transactional `ack` (`batch_id`). Retrying with the same `idempotency_key` and payload returns the original result; reusing the key with a different payload is refused |
+| `publish` | Commit one message, any JSON value, with optional `from` (suppresses self-echo), `to` (direct recipient), transactional `ack` (`batch_id`), and `claims` (`message_id` to claim for `from`; first claim wins). Retrying with the same `idempotency_key` and payload returns the original result; reusing the key with a different payload is refused |
 | `receive` | Next batch, bounded by `max_events` and `max_bytes` (at most 16384), with event-driven `wait` (`true` or `false`). Carries `ack` for the previous batch |
 | `ack` | Description delivery only. Acknowledges the batch shown in the description |
 | `message_<batch_id>` | Tools delivery only. Acknowledges that batch |
@@ -588,7 +618,7 @@ Qualified on 2026-10-16, tools mode, `--batch-bytes 65536`, stock clients with n
 cargo test --workspace
 ```
 
-Integration tests start the real server binary on a loopback port and drive it with the rmcp client over Streamable HTTP, across all three protocol revisions. They cover idempotent publish, redelivery, purely event-driven `receive` (`wait: true` and `wait: false`), the 16 KiB result cap, push, tool-set delivery, both deliveries at once, supersede, per-agent `follow`, route-derived `initialize.instructions`, bearer-token authentication, flat action-enum input schemas with strict per-action request validation, paginated lock-free discovery, concurrent label claims, subscription identity `metadata`, subscription deletion (`action: "delete"`), `start_at` (`"latest"` vs `"earliest"`), self-echo suppression (`from`), direct addressing (`to`), transactional `ack` on `publish`, and recovery after actual isolated `SQLITE_FULL` and `SQLITE_BUSY` write failures. Further integration tests exercise real compiler acceptance/rejection and real filesystem/webhook alert transitions, including failed delivery and retry.
+Integration tests start the real server binary on a loopback port and drive it with the rmcp client over Streamable HTTP, across all three protocol revisions. They cover idempotent publish, redelivery, purely event-driven `receive` (`wait: true` and `wait: false`), the 16 KiB result cap, push, tool-set delivery, both deliveries at once, supersede, per-agent `follow`, route-derived `initialize.instructions`, bearer-token authentication, flat action-enum input schemas with strict per-action request validation, paginated lock-free discovery, concurrent label claims, subscription identity `metadata`, subscription deletion (`action: "delete"`), `start_at` (`"latest"` vs `"earliest"`), self-echo suppression (`from`), direct addressing (`to`), transactional `ack` on `publish`, private streams (member-only access, grant/revoke, `publisher` on every event), first-claim-wins `claims` across concurrent publishes and restarts, and recovery after actual isolated `SQLITE_FULL` and `SQLITE_BUSY` write failures. Further integration tests exercise real compiler acceptance/rejection and real filesystem/webhook alert transitions, including failed delivery and retry.
 
 Waiter regressions run Cargo's actual compiled Rust binary and the portable
 Python 3 stdlib helper (`tools/minymaton-wait.py`) with an empty child

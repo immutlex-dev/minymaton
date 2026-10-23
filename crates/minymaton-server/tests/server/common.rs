@@ -349,6 +349,34 @@ impl Server {
         McpClient::connect(&self.url, lifecycle, ClientCapabilities::default()).await
     }
 
+    /// A client that sends `token` as its bearer token, so the server knows
+    /// it as that token's caller.
+    pub async fn client_with_token(&self, token: &str, lifecycle: Lifecycle) -> McpClient {
+        McpClient::connect_as(
+            &self.url,
+            Some(token),
+            lifecycle,
+            ClientCapabilities::default(),
+        )
+        .await
+    }
+
+    /// A `/mcp/agent/{agent}` client that sends `token` as its bearer token.
+    pub async fn agent_client_with_token(
+        &self,
+        agent: &str,
+        token: &str,
+        lifecycle: Lifecycle,
+    ) -> McpClient {
+        McpClient::connect_as(
+            &self.agent_url(agent),
+            Some(token),
+            lifecycle,
+            ClientCapabilities::default(),
+        )
+        .await
+    }
+
     /// A client that declares these capabilities to the server.
     pub async fn client_declaring(
         &self,
@@ -476,6 +504,16 @@ pub struct McpClient {
 
 impl McpClient {
     async fn connect(url: &str, lifecycle: Lifecycle, capabilities: ClientCapabilities) -> Self {
+        Self::connect_as(url, None, lifecycle, capabilities).await
+    }
+
+    /// Connects, sending `token` as the bearer token when one is given.
+    pub async fn connect_as(
+        url: &str,
+        token: Option<&str>,
+        lifecycle: Lifecycle,
+        capabilities: ClientCapabilities,
+    ) -> Self {
         let book = Arc::new(ProgressBook::default());
         let recorder = ProgressRecorder {
             book: Arc::clone(&book),
@@ -486,10 +524,12 @@ impl McpClient {
             .with_protocol_version(lifecycle.requested()),
         };
         // A lost session must fail the test, not be silently replaced.
-        let transport = StreamableHttpClientTransport::from_config(
-            StreamableHttpClientTransportConfig::with_uri(url.to_owned())
-                .reinit_on_expired_session(false),
-        );
+        let mut config = StreamableHttpClientTransportConfig::with_uri(url.to_owned())
+            .reinit_on_expired_session(false);
+        if let Some(token) = token {
+            config = config.auth_header(token);
+        }
+        let transport = StreamableHttpClientTransport::from_config(config);
         let service = match lifecycle {
             Lifecycle::Initialize(_) => recorder.serve(transport).await,
             Lifecycle::Discover(version) => {

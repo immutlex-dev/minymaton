@@ -339,19 +339,31 @@ class StdioTransport:
         say(f"server exited with code {self.process.wait()}")
 
 
+def http_headers(arguments: argparse.Namespace) -> dict[str, str]:
+    """The extra HTTP headers: each --header, and the bearer token read from the
+    environment variable --token-env names, so the token never sits in argv."""
+    headers = {}
+    for header in arguments.header:
+        name, colon, value = header.partition(":")
+        if not colon:
+            raise SystemExit(f"--header needs 'Name: value', got {header!r}")
+        headers[name.strip()] = value.strip()
+    if arguments.token_env is not None:
+        token = os.environ.get(arguments.token_env)
+        if not token:
+            raise SystemExit(f"environment variable {arguments.token_env} named by --token-env is not set or is empty")
+        headers["Authorization"] = token if token.startswith("Bearer ") else f"Bearer {token}"
+    return headers
+
+
 class Session:
     def __init__(self, arguments: argparse.Namespace) -> None:
         self.doorbell = Doorbell()
         self.next_id = 0
         self.replies: queue.Queue[dict | None] = queue.Queue()
         if arguments.transport == "http":
-            headers = {}
-            for header in arguments.header:
-                name, colon, value = header.partition(":")
-                if not colon:
-                    raise SystemExit(f"--header needs 'Name: value', got {header!r}")
-                headers[name.strip()] = value.strip()
-            self.http: HttpTransport | None = HttpTransport(arguments.url, headers, arguments.cafile)
+            self.http: HttpTransport | None = HttpTransport(
+                arguments.url, http_headers(arguments), arguments.cafile)
             self.stdio: StdioTransport | None = None
         else:
             command = arguments.command[1:] if arguments.command[:1] == ["--"] else arguments.command
@@ -544,11 +556,7 @@ class ReplyListener:
     LABEL = "mcp-send-replies"
 
     def __init__(self, arguments: argparse.Namespace, stream: str) -> None:
-        headers = {}
-        for header in arguments.header:
-            name, _, value = header.partition(":")
-            headers[name.strip()] = value.strip()
-        self.http = HttpTransport(arguments.url, headers, arguments.cafile)
+        self.http = HttpTransport(arguments.url, http_headers(arguments), arguments.cafile)
         self.protocol = arguments.protocol
         self.stream = stream
         self.next_id = 0
@@ -722,7 +730,9 @@ def main() -> int:
     http_parser = transports.add_parser("http", help="Streamable HTTP server, JSON or SSE replies")
     http_parser.add_argument("url", help="the server's MCP endpoint, e.g. https://127.0.0.1:8443/mcp")
     http_parser.add_argument("--header", action="append", default=[], metavar="'Name: value'",
-                             help="extra HTTP header, e.g. an Authorization header; repeatable")
+                             help="extra HTTP header; repeatable")
+    http_parser.add_argument("--token-env", metavar="VAR",
+                             help="send the bearer token held in environment variable VAR (fails if unset or empty)")
     http_parser.add_argument("--cafile", help="CA certificate to trust for https://")
     http_parser.add_argument("--replies", metavar="STREAM",
                              help="also follow this minymaton stream and print each reply published to it")

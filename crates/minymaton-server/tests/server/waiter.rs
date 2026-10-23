@@ -1848,11 +1848,14 @@ async fn parked_fixture() -> (
     let dir = tempfile::tempdir().unwrap();
     let queue = minymaton_core::Queue::open(&dir.path().join("queue.sqlite3")).unwrap();
     queue
-        .stream(json!({"action":"create","name":"orders"}))
+        .stream(json!({"action":"create","name":"orders"}), None)
         .await
         .unwrap();
     let subscription = queue
-        .subscription(json!({"action":"create","stream":"orders","label":"reader"}))
+        .subscription(
+            json!({"action":"create","stream":"orders","label":"reader"}),
+            None,
+        )
         .await
         .unwrap();
     let handle = subscription["handle"].as_str().unwrap().to_owned();

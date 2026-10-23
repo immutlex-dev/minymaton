@@ -22,6 +22,7 @@ use crate::api::{
 };
 use crate::error::{ErrorCode, ToolError};
 use crate::ids::inbox_handle;
+use crate::policy::Membership;
 use crate::signals::Signals;
 use crate::store::{
     Admission, Bounds, Publication, QueueReader, QueueStore, Reader, Selection, Store,
@@ -94,17 +95,40 @@ impl Queue {
         }
     }
 
-    pub async fn stream(&self, arguments: Value) -> Result<Value, ToolError> {
+    /// Runs a `stream` call for `caller`, the authenticated bearer-token
+    /// caller, or `None` on a server without bearer authentication.
+    pub async fn stream(&self, arguments: Value, caller: Option<&str>) -> Result<Value, ToolError> {
         let arguments = parse(arguments)?;
+        let caller = caller.map(str::to_owned);
         let result = match arguments {
-            StreamArgs::Create { name } => {
+            StreamArgs::Create { name, members } => {
                 check_name("name", &name)?;
-                with_store(&self.store, move |store| store.create_stream(&name)).await?
+                for member in members.iter().flatten() {
+                    check_name("members", member)?;
+                }
+                with_store(&self.store, move |store| {
+                    store.create_stream(&name, caller.as_deref(), members.as_deref())
+                })
+                .await?
+            }
+            StreamArgs::Grant {
+                name,
+                caller: member,
+            } => {
+                self.change_member(name, caller, member, Membership::Grant)
+                    .await?
+            }
+            StreamArgs::Revoke {
+                name,
+                caller: member,
+            } => {
+                self.change_member(name, caller, member, Membership::Revoke)
+                    .await?
             }
             StreamArgs::List { after, limit } => {
                 let limit = page_limit(after.as_deref(), limit)?;
                 with_reader(&self.reader, move |reader| {
-                    reader.list_streams(after.as_deref(), limit)
+                    reader.list_streams(caller.as_deref(), after.as_deref(), limit)
                 })
                 .await?
             }
@@ -112,7 +136,27 @@ impl Queue {
         Ok(crate::json(&result))
     }
 
-    pub async fn subscription(&self, arguments: Value) -> Result<Value, ToolError> {
+    async fn change_member(
+        &self,
+        name: String,
+        caller: Option<String>,
+        member: String,
+        change: Membership,
+    ) -> Result<crate::api::StreamResult, ToolError> {
+        check_name("name", &name)?;
+        check_name("caller", &member)?;
+        with_store(&self.store, move |store| {
+            store.change_member(&name, caller.as_deref(), &member, change)
+        })
+        .await
+    }
+
+    pub async fn subscription(
+        &self,
+        arguments: Value,
+        caller: Option<&str>,
+    ) -> Result<Value, ToolError> {
+        let caller = caller.map(str::to_owned);
         let result = match parse(arguments)? {
             SubscriptionArgs::Create {
                 stream,
@@ -128,7 +172,13 @@ impl Queue {
                     check_metadata(metadata)?;
                 }
                 with_store(&self.store, move |store| {
-                    store.claim_subscription(&stream, label.as_deref(), start_at, metadata)
+                    store.claim_subscription(
+                        &stream,
+                        caller.as_deref(),
+                        label.as_deref(),
+                        start_at,
+                        metadata,
+                    )
                 })
                 .await?
             }
@@ -143,7 +193,7 @@ impl Queue {
                     check_metadata(metadata)?;
                 }
                 with_store(&self.store, move |store| {
-                    store.recover_subscription(&stream, &label, metadata)
+                    store.recover_subscription(&stream, caller.as_deref(), &label, metadata)
                 })
                 .await?
             }
@@ -151,7 +201,7 @@ impl Queue {
                 check_name("stream", &stream)?;
                 check_name("label", &label)?;
                 let (deleted, subscription_id) = with_store(&self.store, move |store| {
-                    store.delete_subscription(&stream, &label)
+                    store.delete_subscription(&stream, caller.as_deref(), &label)
                 })
                 .await?;
                 self.signals.subscription_deleted(subscription_id);
@@ -166,7 +216,13 @@ impl Queue {
                 let limit = page_limit(after.as_deref(), limit)?;
                 let waiting = self.signals.waiting_set();
                 with_reader(&self.reader, move |reader| {
-                    reader.list_subscriptions(&stream, after.as_deref(), limit, &waiting)
+                    reader.list_subscriptions(
+                        &stream,
+                        caller.as_deref(),
+                        after.as_deref(),
+                        limit,
+                        &waiting,
+                    )
                 })
                 .await?
             }
@@ -174,8 +230,12 @@ impl Queue {
         Ok(crate::json(&result))
     }
 
-    pub async fn publish(&self, arguments: Value) -> Result<Value, ToolError> {
-        self.publish_committed(arguments)
+    pub async fn publish(
+        &self,
+        arguments: Value,
+        caller: Option<&str>,
+    ) -> Result<Value, ToolError> {
+        self.publish_committed(arguments, caller)
             .await
             .map(|(value, _, _)| value)
     }
@@ -185,6 +245,7 @@ impl Queue {
     pub async fn publish_committed(
         &self,
         arguments: Value,
+        caller: Option<&str>,
     ) -> Result<(Value, bool, Option<String>), ToolError> {
         let PublishArgs {
             stream,
@@ -193,6 +254,7 @@ impl Queue {
             from,
             to,
             ack,
+            claims,
         } = parse(arguments)?;
         check_name("stream", &stream)?;
         check_name("idempotency_key", &idempotency_key)?;
@@ -205,12 +267,15 @@ impl Queue {
         if let Some(ack) = &ack {
             check_name("ack", ack)?;
         }
+        if let Some(claims) = &claims {
+            check_name("claims", claims)?;
+        }
         let sender_label = from.or_else(|| inferred_sender(&payload));
         let recipient_label = to
             .filter(|label| !is_broadcast_recipient(label))
             .or_else(|| inferred_recipient(&payload));
         // Until claim checks exist, every message must fit in a result by itself.
-        let needed = widest_single_event_bytes(&payload);
+        let needed = widest_single_event_bytes(&payload, caller);
         if needed > RESULT_LIMIT {
             return Err(ToolError::new(
                 ErrorCode::MessageTooLarge,
@@ -231,8 +296,17 @@ impl Queue {
         if let Some(ack) = &ack {
             digest_input.push_str(ack);
         }
+        digest_input.push('\0');
+        if let Some(claims) = &claims {
+            digest_input.push_str(claims);
+        }
+        digest_input.push('\0');
+        if let Some(caller) = caller {
+            digest_input.push_str(caller);
+        }
         let digest = Sha256::digest(digest_input.as_bytes()).to_vec();
         let text = payload.to_string();
+        let publisher = caller.map(str::to_owned);
         let published = with_store(&self.store, move |store| {
             store.publish(Publication {
                 stream: &stream,
@@ -241,6 +315,8 @@ impl Queue {
                 sender_label: sender_label.as_deref(),
                 recipient_label: recipient_label.as_deref(),
                 ack: ack.as_deref(),
+                publisher: publisher.as_deref(),
+                claims: claims.as_deref(),
                 digest: &digest,
             })
         })
@@ -273,13 +349,19 @@ impl Queue {
     /// Binds the agent to its own subscription on the stream: the label is the
     /// agent's name. The stream and the subscription are created if missing;
     /// an unbound subscription already claimed by another client is not taken.
-    pub async fn follow(&self, agent: &str, arguments: Value) -> Result<Value, ToolError> {
+    pub async fn follow(
+        &self,
+        agent: &str,
+        caller: Option<&str>,
+        arguments: Value,
+    ) -> Result<Value, ToolError> {
         let FollowArgs { stream } = parse(arguments)?;
         check_name("agent", agent)?;
         check_name("stream", &stream)?;
         let agent = agent.to_owned();
+        let caller = caller.map(str::to_owned);
         let result = with_store(&self.store, move |store| {
-            let handle = store.follow_stream(&agent, &stream)?;
+            let handle = store.follow_stream(&agent, caller.as_deref(), &stream)?;
             Ok(FollowResult::Following {
                 label: agent.clone(),
                 agent,
@@ -303,13 +385,15 @@ impl Queue {
     pub async fn read_description(
         &self,
         handle: &str,
+        caller: Option<&str>,
         id: RequestId,
         max_bytes: u64,
         extend: bool,
     ) -> Result<Value, ToolError> {
         let handle = handle.to_owned();
+        let caller = caller.map(str::to_owned);
         with_store(&self.store, move |store| {
-            store.read_description(&handle, &id, max_bytes, extend)
+            store.read_description(&handle, caller.as_deref(), &id, max_bytes, extend)
         })
         .await
     }
@@ -317,10 +401,16 @@ impl Queue {
     /// Acknowledges the subscription's pending batch, the one its description
     /// shows, and returns that batch. With no pending batch it acknowledges
     /// nothing and seals nothing: a message no listing has shown stays unread.
-    pub async fn acknowledge_pending(&self, handle: &str) -> Result<Value, ToolError> {
+    pub async fn acknowledge_pending(
+        &self,
+        handle: &str,
+        caller: Option<&str>,
+    ) -> Result<Value, ToolError> {
         let reading = handle.to_owned();
+        let caller = caller.map(str::to_owned);
+        let reader = caller.clone();
         let pending = with_store(&self.store, move |store| {
-            store.pending_description(&reading)
+            store.pending_description(&reading, reader.as_deref())
         })
         .await?;
         let Some(batch_id) = pending["batch_id"].as_str().map(str::to_owned) else {
@@ -328,7 +418,7 @@ impl Queue {
         };
         let handle = handle.to_owned();
         let admission = with_store(&self.store, move |store| {
-            store.admit(&handle, Some(&batch_id), false)
+            store.admit(&handle, caller.as_deref(), Some(&batch_id), false)
         })
         .await?;
         let ack_result = admission
@@ -343,10 +433,12 @@ impl Queue {
     pub async fn receive(
         &self,
         arguments: Value,
+        caller: Option<&str>,
         delivery: Delivery,
     ) -> Result<Admitted, ToolError> {
         let request: ReceiveArgs = serde_json::from_value(arguments)
             .map_err(|error| ToolError::invalid(format!("invalid arguments: {error}")))?;
+        let caller = caller.map(str::to_owned);
         if request.max_events == 0 {
             let (Some(ack), None, None) = (request.ack, request.max_bytes, request.wait) else {
                 return Err(ToolError::invalid(
@@ -355,7 +447,7 @@ impl Queue {
             };
             let handle = request.handle;
             let admission = with_store(&self.store, move |store| {
-                store.admit(&handle, Some(&ack), false)
+                store.admit(&handle, caller.as_deref(), Some(&ack), false)
             })
             .await?;
             let ack_result = admission
@@ -380,7 +472,7 @@ impl Queue {
             wait,
         };
         let admission = with_store(&self.store, move |store| {
-            store.admit(&handle, ack.as_deref(), true)
+            store.admit(&handle, caller.as_deref(), ack.as_deref(), true)
         })
         .await?;
         // Wakes an older receive of this subscription, which then ends as superseded.
@@ -398,12 +490,14 @@ impl Queue {
         waiter.first_look().await
     }
 
-    /// The inbox an address names.
-    pub async fn inbox(&self, uri: &str) -> Result<Inbox, ToolError> {
+    /// The inbox an address names, if `caller` may read it.
+    pub async fn inbox(&self, uri: &str, caller: Option<&str>) -> Result<Inbox, ToolError> {
         let handle = inbox_handle(uri).ok_or_else(inbox_not_found)?.to_owned();
         let uri = uri.to_owned();
+        let caller = caller.map(str::to_owned);
         with_reader(&self.reader, move |reader| {
             let (subscription_id, stream_id) = reader.inbox(&handle)?;
+            reader.check_access(stream_id, caller.as_deref())?;
             Ok(Inbox {
                 uri,
                 subscription_id,
@@ -430,13 +524,15 @@ impl Queue {
     pub async fn read_inbox(
         &self,
         uri: &str,
+        caller: Option<&str>,
         request_id: RequestId,
         modern: bool,
     ) -> Result<ReadResourceResult, ToolError> {
         let handle = inbox_handle(uri).ok_or_else(inbox_not_found)?.to_owned();
         let uri = uri.to_owned();
+        let caller = caller.map(str::to_owned);
         with_store(&self.store, move |store| {
-            store.read_inbox(&handle, &uri, &request_id, modern)
+            store.read_inbox(&handle, caller.as_deref(), &uri, &request_id, modern)
         })
         .await
     }

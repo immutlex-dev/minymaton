@@ -53,6 +53,10 @@ pub(crate) struct Modes {
 #[derive(Clone, Debug)]
 pub(crate) struct Agent(pub String);
 
+/// The caller a request's bearer token is enrolled as.
+#[derive(Clone, Debug)]
+pub(crate) struct Caller(pub String);
+
 /// Something that may change a bound tool list.
 #[derive(Clone, Debug)]
 enum Change {
@@ -141,7 +145,7 @@ pub(crate) struct Minymaton {
     /// Every committed publish, committed ACK and follow. Each open list-change
     /// subscription announces the ones that concern its binding.
     tools_changed: tokio::sync::broadcast::Sender<Change>,
-    legacy_stop: DropGuard,
+    notifier_stop: DropGuard,
 }
 
 impl Clone for Minymaton {
@@ -155,7 +159,7 @@ impl Clone for Minymaton {
             agent_route: self.agent_route,
             tools_changed: self.tools_changed.clone(),
             // Each HTTP session owns its notifier's lifetime, not the shared template.
-            legacy_stop: CancellationToken::new().drop_guard(),
+            notifier_stop: CancellationToken::new().drop_guard(),
         }
     }
 }
@@ -216,7 +220,7 @@ impl Minymaton {
             modes,
             agent_route: false,
             tools_changed: tokio::sync::broadcast::channel(16).0,
-            legacy_stop: CancellationToken::new().drop_guard(),
+            notifier_stop: CancellationToken::new().drop_guard(),
         }
     }
 
@@ -264,6 +268,9 @@ impl Minymaton {
         out.push_str(
             "Designate a single coordinator (typically the user-facing orchestrator or lowest active agent-N). Pass from (your label) and optional to (recipient label, or omit for broadcast) on publish with a fresh idempotency_key (retaining that key and payload if retrying an uncertain publication) so self-echo is suppressed and direct messages go only to the recipient. ",
         );
+        out.push_str(
+            "Jobs and knowledge asks: to ask the group, broadcast a payload with \"kind\": \"ask\" and the task or question. Replies carry \"ask\": <the ask's message_id> and go directly to the asker with to. For a job, an agent that can take it asks its owner first, then replies \"kind\": \"offer\"; the asker sends \"kind\": \"award\" to one offer and \"kind\": \"decline\" to the others, and the awarded agent reports \"kind\": \"done\". When no asker decides, take the job by publishing your offer with claims set to the ask's message_id: only the first claim commits, and already_claimed means another agent has it, so stand down. For a knowledge ask, search your own sources and reply only when you found something relevant and your owner agreed to share it, as \"kind\": \"answer\" with summaries and pointers that fit the 16 KiB limit; send \"kind\": \"pass\" only if the asker asked for a count. Never take work or share knowledge without your owner's go. Each event's publisher names the authenticated caller that sent it. For a sensitive ask, create a private stream with stream action create and members (callers enrolled with the server's bearer tokens); any member can grant or revoke access. ",
+        );
         if self.bindable() {
             match (self.modes.description, self.modes.tools) {
                 (true, true) => out.push_str(
@@ -304,6 +311,7 @@ impl Minymaton {
         arguments: Value,
         context: &RequestContext<RoleServer>,
     ) -> Result<Value, ToolError> {
+        let caller = caller_of(&context.extensions);
         if context.ct.is_cancelled() {
             return Err(ToolError::new(
                 ErrorCode::RequestCancelled,
@@ -314,7 +322,11 @@ impl Minymaton {
             request_id: context.id.clone(),
             modern: is_modern(context),
         };
-        match self.queue.receive(arguments, delivery).await? {
+        match self
+            .queue
+            .receive(arguments, caller.as_deref(), delivery)
+            .await?
+        {
             Admitted::Done(result) => Ok(result),
             Admitted::Waiting(waiter) => {
                 let waiting = async {
@@ -377,7 +389,7 @@ impl ServerHandler for Minymaton {
         };
         let description = self.description.clone();
         let queue = Arc::clone(&self.queue);
-        let stop = self.legacy_stop.token().clone();
+        let stop = self.notifier_stop.token().clone();
         tokio::spawn(async move {
             let peer = context.peer;
             let notify = || {
@@ -418,9 +430,15 @@ impl ServerHandler for Minymaton {
         request: ReadResourceRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
+        let caller = caller_of(&context.extensions);
         let result = self
             .queue
-            .read_inbox(&request.uri, context.id.clone(), is_modern(&context))
+            .read_inbox(
+                &request.uri,
+                caller.as_deref(),
+                context.id.clone(),
+                is_modern(&context),
+            )
             .await
             .map_err(resource_error)?;
         Ok(result.into())
@@ -431,9 +449,10 @@ impl ServerHandler for Minymaton {
         request: SubscribeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<(), ErrorData> {
+        let caller = caller_of(&context.extensions);
         let inbox = self
             .queue
-            .inbox(&request.uri)
+            .inbox(&request.uri, caller.as_deref())
             .await
             .map_err(resource_error)?;
         let key = (session_of(&context)?, inbox.uri.clone());
@@ -466,9 +485,10 @@ impl ServerHandler for Minymaton {
         request: UnsubscribeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<(), ErrorData> {
+        let caller = caller_of(&context.extensions);
         let inbox = self
             .queue
-            .inbox(&request.uri)
+            .inbox(&request.uri, caller.as_deref())
             .await
             .map_err(resource_error)?;
         self.pushes.stop(&(session_of(&context)?, inbox.uri));
@@ -507,9 +527,15 @@ impl ServerHandler for Minymaton {
         } else {
             None
         };
+        let caller = caller_of(&context.request_context().extensions);
         let mut inboxes = Vec::new();
         for uri in context.accepted().resource_subscriptions.iter().flatten() {
-            inboxes.push(self.queue.inbox(uri).await.map_err(resource_error)?);
+            inboxes.push(
+                self.queue
+                    .inbox(uri, caller.as_deref())
+                    .await
+                    .map_err(resource_error)?,
+            );
         }
         let watches = inboxes.iter().map(|inbox| {
             let sink = context.sink().clone();
@@ -570,11 +596,13 @@ impl ServerHandler for Minymaton {
             tools.push(ack_tool());
         }
         let modes = self.modes;
+        let caller = caller_of(&context.extensions);
         if let Some(binding) = &binding {
             let batch = self
                 .queue
                 .read_description(
                     &binding.handle,
+                    caller.as_deref(),
                     context.id.clone(),
                     modes.batch_bytes,
                     // A message tool's name pins what its ACK commits, but the
@@ -638,6 +666,8 @@ impl ServerHandler for Minymaton {
     ) -> Result<CallToolResponse, ErrorData> {
         let arguments = Value::Object(request.arguments.unwrap_or_default());
         let name = request.name.as_ref();
+        let caller = caller_of(&context.extensions);
+        let caller = caller.as_deref();
         let bound = if name == ACK_TOOL || name.starts_with(MESSAGE_TOOL) {
             self.binding(&context.extensions)
                 .await
@@ -646,11 +676,11 @@ impl ServerHandler for Minymaton {
             None
         };
         let outcome = match name {
-            "stream" => self.queue.stream(arguments).await,
+            "stream" => self.queue.stream(arguments, caller).await,
             "subscription" => {
                 let is_delete = arguments["action"].as_str() == Some("delete");
                 let label = arguments["label"].as_str().map(str::to_owned);
-                let outcome = self.queue.subscription(arguments).await;
+                let outcome = self.queue.subscription(arguments, caller).await;
                 if is_delete
                     && outcome.is_ok()
                     && let Some(label) = label
@@ -670,7 +700,7 @@ impl ServerHandler for Minymaton {
                     .or_else(|| arguments["payload"]["to"].as_str())
                     .filter(|&label| !matches!(label, "*" | "all" | "broadcast"))
                     .map(str::to_owned);
-                let outcome = self.queue.publish_committed(arguments).await;
+                let outcome = self.queue.publish_committed(arguments, caller).await;
                 if let Ok((_, committed, acked_handle)) = &outcome {
                     if let Some(handle) = acked_handle {
                         self.announce(Change::Handle(handle.clone()));
@@ -690,7 +720,7 @@ impl ServerHandler for Minymaton {
             FOLLOW_TOOL if self.agent_route => {
                 let agent = agent_of(&context.extensions)
                     .ok_or_else(|| ErrorData::internal_error("the request names no agent", None))?;
-                let outcome = self.queue.follow(&agent, arguments).await;
+                let outcome = self.queue.follow(&agent, caller, arguments).await;
                 if outcome.is_ok() {
                     self.announce(Change::Agent(agent));
                 }
@@ -698,7 +728,10 @@ impl ServerHandler for Minymaton {
             }
             ACK_TOOL if self.modes.description && bound.is_some() => {
                 let binding = bound.expect("checked above");
-                let outcome = self.queue.acknowledge_pending(&binding.handle).await;
+                let outcome = self
+                    .queue
+                    .acknowledge_pending(&binding.handle, caller)
+                    .await;
                 if let Ok(result) = &outcome
                     && result["ack_result"]["outcome"] == "committed"
                 {
@@ -753,7 +786,7 @@ fn tools() -> Vec<Tool> {
     vec![
         tool::<StreamArgs, StreamResult>(
             "stream",
-            "List existing streams (action \"list\", optional after and limit, at most 100 per page), or explicitly create a named stream (action \"create\", name). Join the existing agents stream unless the user names another; do not create a private coordination stream.",
+            "List the streams you may use (action \"list\", optional after and limit, at most 100 per page), or explicitly create a named stream (action \"create\", name). Join the existing agents stream unless the user names another; do not create a private coordination stream. A sensitive ask goes on a private stream: action \"create\" with members (callers enrolled with the server's bearer tokens; you are added) admits only those callers, and any member can admit or remove a caller with action \"grant\" or \"revoke\" (name, caller). Every other caller is refused with stream_forbidden.",
         ),
         tool::<SubscriptionArgs, SubscriptionResult>(
             "subscription",
@@ -761,7 +794,7 @@ fn tools() -> Vec<Tool> {
         ),
         tool::<PublishArgs, PublishResult>(
             "publish",
-            "Publish one message, any JSON value, to a stream. Use a fresh idempotency_key for each message; a retry with the same key and payload returns the original result instead of publishing twice. Optional from (sender label) suppresses self-echo on that subscription; optional to (recipient label) delivers only to that subscription; optional ack (batch_id from a handled receive batch on this stream) acknowledges that batch atomically in the same transaction.",
+            "Publish one message, any JSON value, to a stream. Use a fresh idempotency_key for each message; a retry with the same key and payload returns the original result instead of publishing twice. Optional from (sender label) suppresses self-echo on that subscription; optional to (recipient label) delivers only to that subscription; optional ack (batch_id from a handled receive batch on this stream) acknowledges that batch atomically in the same transaction. Optional claims (the message_id of an earlier message on this stream, such as a job ask) claims it for from: only the first claim commits, and a later one fails with already_claimed naming the winner and commits nothing, its ack included.",
         ),
         tool::<ReceiveArgs, ReceiveResult>(
             "receive",
@@ -812,6 +845,15 @@ fn follow_tool() -> Tool {
         FOLLOW_TOOL,
         "Follow a stream: from now on this tool list carries the stream's pending batch, under a subscription labelled with this endpoint's agent name. The stream and the subscription are created if missing; an unbound subscription already claimed by another client is not taken. Following another stream replaces the binding, re-following an earlier stream resumes this agent's subscription, and the binding survives a server restart.",
     )
+}
+
+/// The caller a request's bearer token is enrolled as, if the server
+/// authenticates requests.
+fn caller_of(extensions: &Extensions) -> Option<String> {
+    extensions
+        .get::<http::request::Parts>()
+        .and_then(|parts| parts.extensions.get::<Caller>())
+        .map(|caller| caller.0.clone())
 }
 
 /// The agent an `/mcp/agent/<name>` request names.
@@ -941,13 +983,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let queue = Queue::open(&dir.path().join("queue.sqlite3")).unwrap();
         queue
-            .stream(json!({"action":"create","name":"orders"}))
+            .stream(json!({"action":"create","name":"orders"}), None)
             .await
             .unwrap();
         let subscription = queue
-            .subscription(json!({
-                "action":"create","stream":"orders","label":"reader",
-            }))
+            .subscription(
+                json!({
+                    "action":"create","stream":"orders","label":"reader",
+                }),
+                None,
+            )
             .await
             .unwrap();
         let handle = subscription["handle"].as_str().unwrap().to_owned();
@@ -994,21 +1039,25 @@ mod tests {
         assert_eq!(*activity.wait_for(|count| *count == 0).await.unwrap(), 0);
         let listed = handler
             .queue
-            .subscription(json!({"action":"list","stream":"orders"}))
+            .subscription(json!({"action":"list","stream":"orders"}), None)
             .await
             .unwrap();
         assert_eq!(listed["subscriptions"][0]["waiting"], false);
         handler
             .queue
-            .publish(json!({
-                "stream":"orders","idempotency_key":"after-cancel","payload":"next",
-            }))
+            .publish(
+                json!({
+                    "stream":"orders","idempotency_key":"after-cancel","payload":"next",
+                }),
+                None,
+            )
             .await
             .unwrap();
         let Admitted::Done(result) = handler
             .queue
             .receive(
                 json!({"handle":handle,"max_events":10,"max_bytes":16384,"wait":false}),
+                None,
                 Delivery {
                     request_id: rmcp::model::RequestId::Number(2),
                     modern: false,

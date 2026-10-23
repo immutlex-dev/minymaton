@@ -9,9 +9,17 @@ pub enum ErrorCode {
     InvalidArguments,
     StreamExists,
     StreamNotFound,
+    /// The stream is private and the caller is not a member.
+    StreamForbidden,
+    /// Private streams need the server's bearer authentication.
+    PrivateStreamNeedsAuth,
     SubscriptionExists,
     SubscriptionNotFound,
     IdempotencyConflict,
+    /// The message a publish claims was already claimed.
+    AlreadyClaimed,
+    /// The message a publish claims is not on that stream.
+    ClaimTargetNotFound,
     MessageTooLarge,
     InvalidAck,
     BatchExceedsBounds,

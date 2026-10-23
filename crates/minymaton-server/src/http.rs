@@ -33,7 +33,7 @@ use tokio::net::TcpListener;
 
 use crate::auth::BearerAuthenticator;
 use crate::request_log::{Carrier, RequestLog};
-use crate::tools::{Agent, Binding, Minymaton, Modes};
+use crate::tools::{Agent, Binding, Caller, Minymaton, Modes};
 
 /// The request log and the body limit rmcp enforces.
 struct Logging {
@@ -103,19 +103,22 @@ fn router(
     router
 }
 
+/// Admits only enrolled bearer tokens, and hands the handler the caller the
+/// token is enrolled as.
 async fn auth_gate(
     State(auth): State<Arc<BearerAuthenticator>>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
-    if auth.authenticate(request.headers()).is_none() {
+    let Some(caller) = auth.authenticate(request.headers()).map(str::to_owned) else {
         return (
             StatusCode::UNAUTHORIZED,
             [(WWW_AUTHENTICATE, "Bearer")],
             "missing or unrecognized bearer token",
         )
             .into_response();
-    }
+    };
+    request.extensions_mut().insert(Caller(caller));
     next.run(request).await
 }
 

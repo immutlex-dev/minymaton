@@ -18,6 +18,7 @@ use crate::api::{
 };
 use crate::error::{ErrorCode, ToolError};
 use crate::ids::{BATCH_PREFIX, HANDLE_PREFIX, MESSAGE_PREFIX, now, random_id};
+use crate::policy::{self, Claim, MemberWrite, Members, Membership};
 use crate::wire::{
     RESULT_LIMIT, discovery_bytes, inbox_bytes, inbox_result, widest_batch_bytes, wire_bytes,
 };
@@ -83,6 +84,25 @@ CREATE TABLE IF NOT EXISTS agent_subscriptions (
     subscription_id INTEGER PRIMARY KEY REFERENCES subscriptions (id),
     agent TEXT NOT NULL
 ) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS stream_members (
+    stream_id INTEGER NOT NULL REFERENCES streams (id),
+    caller TEXT NOT NULL,
+    PRIMARY KEY (stream_id, caller)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS publishers (
+    stream_id INTEGER NOT NULL,
+    sequence INTEGER NOT NULL,
+    publisher TEXT NOT NULL,
+    PRIMARY KEY (stream_id, sequence),
+    FOREIGN KEY (stream_id, sequence) REFERENCES events (stream_id, sequence)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS claims (
+    claimed_message_id TEXT PRIMARY KEY REFERENCES events (message_id),
+    stream_id INTEGER NOT NULL REFERENCES streams (id),
+    claim_message_id TEXT NOT NULL REFERENCES events (message_id),
+    claimed_by TEXT NOT NULL,
+    publisher TEXT
+) STRICT, WITHOUT ROWID;
 ";
 
 /// The queue's writes at the atomic queue-command boundary. Each method is one
@@ -90,8 +110,23 @@ CREATE TABLE IF NOT EXISTS agent_subscriptions (
 /// them. [`crate::Queue`] owns argument validation, wake-up signals and the
 /// receive wait, and reaches durable state only through this trait.
 pub trait QueueStore: Send {
-    /// Creates an empty stream; `stream_exists` if the name is taken.
-    fn create_stream(&mut self, name: &str) -> Result<StreamResult, ToolError>;
+    /// Creates an empty stream; `stream_exists` if the name is taken. With
+    /// `members` the stream is private to them and the creating `caller`.
+    fn create_stream(
+        &mut self,
+        name: &str,
+        caller: Option<&str>,
+        members: Option<&[String]>,
+    ) -> Result<StreamResult, ToolError>;
+
+    /// Grants or revokes `member` on a private stream `caller` belongs to.
+    fn change_member(
+        &mut self,
+        name: &str,
+        caller: Option<&str>,
+        member: &str,
+        change: Membership,
+    ) -> Result<StreamResult, ToolError>;
 
     /// Opens a subscription labelled `label`, or the smallest free `agent-N`
     /// when `label` is `None`. `start_at` defaults to earliest for an explicit
@@ -99,6 +134,7 @@ pub trait QueueStore: Send {
     fn claim_subscription(
         &mut self,
         stream: &str,
+        caller: Option<&str>,
         label: Option<&str>,
         start_at: Option<StartAt>,
         metadata: Option<BTreeMap<String, Value>>,
@@ -109,6 +145,7 @@ pub trait QueueStore: Send {
     fn recover_subscription(
         &mut self,
         stream: &str,
+        caller: Option<&str>,
         label: &str,
         metadata: Option<BTreeMap<String, Value>>,
     ) -> Result<SubscriptionResult, ToolError>;
@@ -118,12 +155,18 @@ pub trait QueueStore: Send {
     fn delete_subscription(
         &mut self,
         stream: &str,
+        caller: Option<&str>,
         label: &str,
     ) -> Result<(SubscriptionResult, i64), ToolError>;
 
     /// Ensures `stream` exists and binds `agent` to its own subscription
     /// labelled `agent`, returning that subscription's handle.
-    fn follow_stream(&mut self, agent: &str, stream: &str) -> Result<String, ToolError>;
+    fn follow_stream(
+        &mut self,
+        agent: &str,
+        caller: Option<&str>,
+        stream: &str,
+    ) -> Result<String, ToolError>;
 
     /// The handle of the stream's subscription labelled `label`, creating the
     /// stream and the subscription if either is missing.
@@ -138,6 +181,7 @@ pub trait QueueStore: Send {
     fn admit(
         &mut self,
         handle: &str,
+        caller: Option<&str>,
         ack: Option<&str>,
         take_ownership: bool,
     ) -> Result<Admission, ToolError>;
@@ -170,6 +214,7 @@ pub trait QueueStore: Send {
     fn read_inbox(
         &mut self,
         handle: &str,
+        caller: Option<&str>,
         uri: &str,
         id: &RequestId,
         modern: bool,
@@ -180,6 +225,7 @@ pub trait QueueStore: Send {
     fn read_description(
         &mut self,
         handle: &str,
+        caller: Option<&str>,
         id: &RequestId,
         max_bytes: u64,
         extend: bool,
@@ -187,19 +233,30 @@ pub trait QueueStore: Send {
 
     /// The pending batch exactly as the description shows it, or
     /// `{"status":"empty"}`. Seals nothing and records no attempt.
-    fn pending_description(&mut self, handle: &str) -> Result<Value, ToolError>;
+    fn pending_description(
+        &mut self,
+        handle: &str,
+        caller: Option<&str>,
+    ) -> Result<Value, ToolError>;
 }
 
 /// The queue's read-only discovery, served beside [`QueueStore`] so listings
 /// never wait behind a write.
 pub trait QueueReader: Send {
-    fn list_streams(&self, after: Option<&str>, limit: u64) -> Result<StreamResult, ToolError>;
+    /// One page of the streams `caller` may use.
+    fn list_streams(
+        &self,
+        caller: Option<&str>,
+        after: Option<&str>,
+        limit: u64,
+    ) -> Result<StreamResult, ToolError>;
 
     /// One page of the stream's subscriptions; `waiting` holds the ids of
     /// subscriptions with a receive parked in this process.
     fn list_subscriptions(
         &self,
         stream: &str,
+        caller: Option<&str>,
         after: Option<&str>,
         limit: u64,
         waiting: &HashSet<i64>,
@@ -213,6 +270,9 @@ pub trait QueueReader: Send {
 
     /// The subscription id and stream id behind an inbox handle.
     fn inbox(&self, handle: &str) -> Result<(i64, i64), ToolError>;
+
+    /// `stream_forbidden` unless `caller` may use the stream.
+    fn check_access(&self, stream_id: i64, caller: Option<&str>) -> Result<(), ToolError>;
 }
 
 /// One `publish` command. `digest` identifies the request for idempotent
@@ -226,6 +286,10 @@ pub struct Publication<'a> {
     pub sender_label: Option<&'a str>,
     pub recipient_label: Option<&'a str>,
     pub ack: Option<&'a str>,
+    /// The authenticated caller publishing, recorded on the event.
+    pub publisher: Option<&'a str>,
+    /// The `message_id` this publish claims for `sender_label`.
+    pub claims: Option<&'a str>,
     pub digest: &'a [u8],
 }
 
@@ -248,6 +312,9 @@ pub struct Admission {
     /// The ownership generation this receive took; ACK-only calls take none.
     pub generation: i64,
     pub ack: Option<AckResult>,
+    /// The caller the receive runs for; its access is checked again before
+    /// anything is delivered.
+    pub caller: Option<String>,
 }
 
 /// One receive's effective bounds.
@@ -309,18 +376,24 @@ impl Reader {
 }
 
 impl QueueReader for Reader {
-    fn list_streams(&self, after: Option<&str>, limit: u64) -> Result<StreamResult, ToolError> {
-        list_streams_on(&self.conn, after, limit)
+    fn list_streams(
+        &self,
+        caller: Option<&str>,
+        after: Option<&str>,
+        limit: u64,
+    ) -> Result<StreamResult, ToolError> {
+        list_streams_on(&self.conn, caller, after, limit)
     }
 
     fn list_subscriptions(
         &self,
         stream: &str,
+        caller: Option<&str>,
         after: Option<&str>,
         limit: u64,
         waiting: &HashSet<i64>,
     ) -> Result<SubscriptionResult, ToolError> {
-        list_subscriptions_on(&self.conn, stream, after, limit, waiting)
+        list_subscriptions_on(&self.conn, stream, caller, after, limit, waiting)
     }
 
     fn agent_binding(&self, agent: &str) -> Result<Option<(String, String, String)>, ToolError> {
@@ -333,6 +406,10 @@ impl QueueReader for Reader {
 
     fn inbox(&self, handle: &str) -> Result<(i64, i64), ToolError> {
         inbox_on(&self.conn, handle)
+    }
+
+    fn check_access(&self, stream_id: i64, caller: Option<&str>) -> Result<(), ToolError> {
+        access(&self.conn, stream_id, caller)
     }
 }
 
@@ -349,12 +426,17 @@ impl Store {
         stream: &str,
         label: &str,
     ) -> Result<SubscriptionResult, ToolError> {
-        self.claim_subscription(stream, Some(label), Some(StartAt::Earliest), None)
+        self.claim_subscription(stream, None, Some(label), Some(StartAt::Earliest), None)
     }
 }
 
 impl QueueStore for Store {
-    fn create_stream(&mut self, name: &str) -> Result<StreamResult, ToolError> {
+    fn create_stream(
+        &mut self,
+        name: &str,
+        caller: Option<&str>,
+        members: Option<&[String]>,
+    ) -> Result<StreamResult, ToolError> {
         let tx = self.write()?;
         let exists = tx
             .query_row("SELECT 1 FROM streams WHERE name = ?1", [name], |_| Ok(()))
@@ -370,21 +452,67 @@ impl QueueStore for Store {
             "INSERT INTO streams (name, created_at) VALUES (?1, ?2)",
             params![name, now()],
         )?;
+        let stream_id = tx.last_insert_rowid();
+        for member in policy::initial_members(caller, members)? {
+            tx.execute(
+                "INSERT INTO stream_members (stream_id, caller) VALUES (?1, ?2)",
+                params![stream_id, member],
+            )?;
+        }
         tx.commit()?;
         Ok(StreamResult::Created {
             stream: name.to_owned(),
         })
     }
 
+    fn change_member(
+        &mut self,
+        name: &str,
+        caller: Option<&str>,
+        member: &str,
+        change: Membership,
+    ) -> Result<StreamResult, ToolError> {
+        let tx = self.write()?;
+        let stream_id = stream_id(&tx, name)?;
+        let target_is_member = members(&tx, stream_id, Some(member))?.includes_caller;
+        let (write, result) = policy::change_member(
+            name,
+            members(&tx, stream_id, caller)?,
+            caller,
+            member,
+            target_is_member,
+            change,
+        )?;
+        match write {
+            MemberWrite::Insert => {
+                tx.execute(
+                    "INSERT INTO stream_members (stream_id, caller) VALUES (?1, ?2)",
+                    params![stream_id, member],
+                )?;
+            }
+            MemberWrite::Delete => {
+                tx.execute(
+                    "DELETE FROM stream_members WHERE stream_id = ?1 AND caller = ?2",
+                    params![stream_id, member],
+                )?;
+            }
+            MemberWrite::Nothing => {}
+        }
+        tx.commit()?;
+        Ok(result)
+    }
+
     fn claim_subscription(
         &mut self,
         stream: &str,
+        caller: Option<&str>,
         label: Option<&str>,
         start_at: Option<StartAt>,
         metadata: Option<BTreeMap<String, Value>>,
     ) -> Result<SubscriptionResult, ToolError> {
         let tx = self.write()?;
         let stream_id = stream_id(&tx, stream)?;
+        access(&tx, stream_id, caller)?;
         let effective_start = start_at.unwrap_or(match label {
             Some(_) => StartAt::Earliest,
             None => StartAt::Latest,
@@ -460,11 +588,13 @@ impl QueueStore for Store {
     fn recover_subscription(
         &mut self,
         stream: &str,
+        caller: Option<&str>,
         label: &str,
         metadata: Option<BTreeMap<String, Value>>,
     ) -> Result<SubscriptionResult, ToolError> {
         let tx = self.write()?;
         let stream_id = stream_id(&tx, stream)?;
+        access(&tx, stream_id, caller)?;
         let (handle, stored_metadata): (String, Option<String>) = tx
             .query_row(
                 "SELECT handle, metadata FROM subscriptions WHERE stream_id = ?1 AND label = ?2",
@@ -509,10 +639,12 @@ impl QueueStore for Store {
     fn delete_subscription(
         &mut self,
         stream: &str,
+        caller: Option<&str>,
         label: &str,
     ) -> Result<(SubscriptionResult, i64), ToolError> {
         let tx = self.write()?;
         let stream_id = stream_id(&tx, stream)?;
+        access(&tx, stream_id, caller)?;
         let subscription_id: i64 = tx
             .query_row(
                 "SELECT id FROM subscriptions WHERE stream_id = ?1 AND label = ?2",
@@ -559,7 +691,12 @@ impl QueueStore for Store {
     /// labelled `agent` on `stream` in one transaction, reusing an earlier
     /// `follow`-created subscription for `agent` and refusing to hijack an
     /// unbound subscription claimed by another client.
-    fn follow_stream(&mut self, agent: &str, stream: &str) -> Result<String, ToolError> {
+    fn follow_stream(
+        &mut self,
+        agent: &str,
+        caller: Option<&str>,
+        stream: &str,
+    ) -> Result<String, ToolError> {
         let tx = self.write()?;
         tx.execute(
             "INSERT INTO streams (name, created_at) VALUES (?1, ?2)
@@ -567,6 +704,7 @@ impl QueueStore for Store {
             params![stream, now()],
         )?;
         let stream_id = stream_id(&tx, stream)?;
+        access(&tx, stream_id, caller)?;
         let existing: Option<(i64, String, bool)> = tx
             .query_row(
                 "SELECT subscriptions.id,
@@ -633,7 +771,7 @@ impl QueueStore for Store {
     }
 
     fn ensure_subscription(&mut self, stream: &str, label: &str) -> Result<String, ToolError> {
-        match self.create_stream(stream) {
+        match self.create_stream(stream, None, None) {
             Ok(_) => {}
             Err(error) if error.code == ErrorCode::StreamExists => {}
             Err(error) => return Err(error),
@@ -641,7 +779,7 @@ impl QueueStore for Store {
         let subscription = match self.create_subscription(stream, label) {
             Ok(created) => created,
             Err(error) if error.code == ErrorCode::SubscriptionExists => {
-                self.recover_subscription(stream, label, None)?
+                self.recover_subscription(stream, None, label, None)?
             }
             Err(error) => return Err(error),
         };
@@ -662,6 +800,8 @@ impl QueueStore for Store {
             sender_label,
             recipient_label,
             ack,
+            publisher,
+            claims,
             digest,
         } = publication;
         let tx = self.write()?;
@@ -673,6 +813,7 @@ impl QueueStore for Store {
             )
             .optional()?
             .ok_or_else(|| stream_not_found(stream))?;
+        access(&tx, stream_id, publisher)?;
         let prior: Option<(Vec<u8>, i64)> = tx
             .query_row(
                 "SELECT request_digest, sequence FROM publishes
@@ -759,6 +900,36 @@ impl QueueStore for Store {
                 acked_handle,
             });
         }
+        let claim = match claims {
+            None => None,
+            Some(claimed) => {
+                let target_exists = tx
+                    .query_row(
+                        "SELECT 1 FROM events WHERE stream_id = ?1 AND message_id = ?2",
+                        params![stream_id, claimed],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some();
+                let winner = tx
+                    .query_row(
+                        "SELECT claim_message_id, claimed_by, publisher FROM claims
+                         WHERE claimed_message_id = ?1",
+                        [claimed],
+                        |row| {
+                            Ok(Claim {
+                                claim_message_id: row.get(0)?,
+                                claimed_by: row.get(1)?,
+                                publisher: row.get(2)?,
+                            })
+                        },
+                    )
+                    .optional()?;
+                let claimed_by =
+                    policy::claim(claimed, stream, target_exists, winner, sender_label)?;
+                Some((claimed, claimed_by))
+            }
+        };
         let sequence = last_sequence + 1;
         let message_id = random_id(MESSAGE_PREFIX)?;
         let published_at = now();
@@ -775,6 +946,19 @@ impl QueueStore for Store {
                 recipient_label
             ],
         )?;
+        if let Some(publisher) = publisher {
+            tx.execute(
+                "INSERT INTO publishers (stream_id, sequence, publisher) VALUES (?1, ?2, ?3)",
+                params![stream_id, sequence, publisher],
+            )?;
+        }
+        if let Some((claimed, claimed_by)) = claim {
+            tx.execute(
+                "INSERT INTO claims (claimed_message_id, stream_id, claim_message_id, claimed_by, publisher)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![claimed, stream_id, message_id, claimed_by, publisher],
+            )?;
+        }
         tx.execute(
             "UPDATE streams SET last_sequence = ?2 WHERE id = ?1",
             params![stream_id, sequence],
@@ -803,6 +987,7 @@ impl QueueStore for Store {
     fn admit(
         &mut self,
         handle: &str,
+        caller: Option<&str>,
         ack: Option<&str>,
         take_ownership: bool,
     ) -> Result<Admission, ToolError> {
@@ -820,6 +1005,7 @@ impl QueueStore for Store {
                     "no subscription has that handle; recover it by stream and label",
                 )
             })?;
+        access(&tx, stream_id, caller)?;
         let ack = match ack {
             None => None,
             Some(batch_id) => Some(acknowledge(&tx, subscription_id, batch_id)?),
@@ -848,6 +1034,7 @@ impl QueueStore for Store {
             handle: handle.to_owned(),
             generation,
             ack,
+            caller: caller.map(str::to_owned),
         })
     }
 
@@ -861,6 +1048,7 @@ impl QueueStore for Store {
         id: &RequestId,
     ) -> Result<Selection, ToolError> {
         let tx = self.write()?;
+        access(&tx, admission.stream_id, admission.caller.as_deref())?;
         let row: Option<(i64, i64, String)> = tx
             .query_row(
                 "SELECT committed_sequence, owner_generation, label FROM subscriptions WHERE id = ?1",
@@ -908,6 +1096,7 @@ impl QueueStore for Store {
         modern: bool,
     ) -> Result<ReceiveResult, ToolError> {
         let tx = self.write()?;
+        access(&tx, admission.stream_id, admission.caller.as_deref())?;
         let owner: Option<(String, i64)> = tx
             .query_row(
                 "SELECT label, owner_generation FROM subscriptions WHERE id = ?1",
@@ -960,18 +1149,26 @@ impl QueueStore for Store {
     fn read_inbox(
         &mut self,
         handle: &str,
+        caller: Option<&str>,
         uri: &str,
         id: &RequestId,
         modern: bool,
     ) -> Result<ReadResourceResult, ToolError> {
-        self.read_batch(handle, id, Delivery::Deliver, RESULT_LIMIT, |read| {
-            let result = inbox_result(uri, &read, modern);
-            let needed = inbox_bytes(&result, id, modern);
-            if needed > RESULT_LIMIT {
-                return Err(exceeds_bounds(needed, RESULT_LIMIT, None));
-            }
-            Ok(result)
-        })
+        self.read_batch(
+            handle,
+            caller,
+            id,
+            Delivery::Deliver,
+            RESULT_LIMIT,
+            |read| {
+                let result = inbox_result(uri, &read, modern);
+                let needed = inbox_bytes(&result, id, modern);
+                if needed > RESULT_LIMIT {
+                    return Err(exceeds_bounds(needed, RESULT_LIMIT, None));
+                }
+                Ok(result)
+            },
+        )
     }
 
     /// The description's pending batch, sealing a new one from the backlog
@@ -981,6 +1178,7 @@ impl QueueStore for Store {
     fn read_description(
         &mut self,
         handle: &str,
+        caller: Option<&str>,
         id: &RequestId,
         max_bytes: u64,
         extend: bool,
@@ -990,16 +1188,21 @@ impl QueueStore for Store {
         } else {
             Delivery::Deliver
         };
-        self.read_batch(handle, id, delivery, max_bytes, without_attempt)
+        self.read_batch(handle, caller, id, delivery, max_bytes, without_attempt)
     }
 
     /// The pending batch exactly as the description shows it, or
     /// `{"status":"empty"}` when none is pending. Seals nothing from the
     /// backlog and records no delivery attempt: it reads only what a listing
     /// has already shown.
-    fn pending_description(&mut self, handle: &str) -> Result<Value, ToolError> {
+    fn pending_description(
+        &mut self,
+        handle: &str,
+        caller: Option<&str>,
+    ) -> Result<Value, ToolError> {
         self.read_batch(
             handle,
+            caller,
             &RequestId::Number(0),
             Delivery::Peek,
             RESULT_LIMIT,
@@ -1012,6 +1215,7 @@ impl Store {
     fn read_batch<T>(
         &mut self,
         handle: &str,
+        caller: Option<&str>,
         id: &RequestId,
         delivery: Delivery,
         max_bytes: u64,
@@ -1026,6 +1230,7 @@ impl Store {
             )
             .optional()?
             .ok_or_else(inbox_not_found)?;
+        access(&tx, stream_id, caller)?;
         let backlog = Backlog {
             subscription_id,
             stream_id,
@@ -1077,15 +1282,28 @@ impl Store {
 
 fn list_streams_on(
     conn: &Connection,
+    caller: Option<&str>,
     after: Option<&str>,
     limit: u64,
 ) -> Result<StreamResult, ToolError> {
-    let mut statement = conn.prepare(
-        "SELECT name FROM streams WHERE (?1 IS NULL OR name > ?1) ORDER BY name LIMIT ?2",
-    )?;
-    let mut streams = statement
-        .query_map(params![after, limit + 1], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut statement =
+        conn.prepare("SELECT id, name FROM streams WHERE (?1 IS NULL OR name > ?1) ORDER BY name")?;
+    let mut rows = statement.query(params![after])?;
+    let mut streams = Vec::new();
+    while (streams.len() as u64) <= limit {
+        let Some(row) = rows.next()? else {
+            break;
+        };
+        if policy::listed(members(conn, row.get(0)?, caller)?) {
+            streams.push(row.get::<_, String>(1)?);
+        }
+    }
+    stream_page(streams, limit)
+}
+
+/// One page of stream names from up to `limit + 1` names in order, trimmed to
+/// fit the result byte limit.
+fn stream_page(mut streams: Vec<String>, limit: u64) -> Result<StreamResult, ToolError> {
     let mut more = streams.len() > limit as usize;
     if more {
         streams.pop();
@@ -1112,11 +1330,13 @@ fn list_streams_on(
 fn list_subscriptions_on(
     conn: &Connection,
     stream: &str,
+    caller: Option<&str>,
     after: Option<&str>,
     limit: u64,
     waiting: &HashSet<i64>,
 ) -> Result<SubscriptionResult, ToolError> {
     let stream_id = stream_id(conn, stream)?;
+    access(conn, stream_id, caller)?;
     let mut statement = conn.prepare(
         "SELECT id, label, handle, last_active_at, metadata FROM subscriptions
          WHERE stream_id = ?1 AND (?2 IS NULL OR label > ?2) ORDER BY label LIMIT ?3",
@@ -1431,12 +1651,13 @@ fn fit(
     id: &RequestId,
 ) -> Result<Vec<EventEnvelope>, SealError> {
     let mut statement = tx.prepare(
-        "SELECT sequence, message_id, published_at, payload FROM events
-         WHERE stream_id = ?1
-           AND sequence > ?2
-           AND (sender_label IS NULL OR sender_label != ?3)
-           AND (recipient_label IS NULL OR recipient_label = ?3)
-         ORDER BY sequence",
+        "SELECT e.sequence, e.message_id, e.published_at, e.payload, p.publisher FROM events e
+         LEFT JOIN publishers p ON p.stream_id = e.stream_id AND p.sequence = e.sequence
+         WHERE e.stream_id = ?1
+           AND e.sequence > ?2
+           AND (e.sender_label IS NULL OR e.sender_label != ?3)
+           AND (e.recipient_label IS NULL OR e.recipient_label = ?3)
+         ORDER BY e.sequence",
     )?;
     let mut rows = statement.query(params![backlog.stream_id, after, backlog.label])?;
     let mut events = Vec::new();
@@ -1475,12 +1696,13 @@ fn batch_contents(
     }
     let events = {
         let mut statement = tx.prepare(
-            "SELECT sequence, message_id, published_at, payload FROM events
-             WHERE stream_id = ?1
-               AND sequence BETWEEN ?2 AND ?3
-               AND (sender_label IS NULL OR sender_label != ?4)
-               AND (recipient_label IS NULL OR recipient_label = ?4)
-             ORDER BY sequence",
+            "SELECT e.sequence, e.message_id, e.published_at, e.payload, p.publisher FROM events e
+             LEFT JOIN publishers p ON p.stream_id = e.stream_id AND p.sequence = e.sequence
+             WHERE e.stream_id = ?1
+               AND e.sequence BETWEEN ?2 AND ?3
+               AND (e.sender_label IS NULL OR e.sender_label != ?4)
+               AND (e.recipient_label IS NULL OR e.recipient_label = ?4)
+             ORDER BY e.sequence",
         )?;
         let mut rows = statement.query(params![stream_id, first, last, label])?;
         let mut events = Vec::new();
@@ -1615,6 +1837,24 @@ fn stream_not_found(name: &str) -> ToolError {
     )
 }
 
+/// The stream's members as this connection sees them.
+fn members(conn: &Connection, stream_id: i64, caller: Option<&str>) -> Result<Members, ToolError> {
+    let (count, includes_caller): (i64, bool) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(caller = ?2), 0) > 0
+         FROM stream_members WHERE stream_id = ?1",
+        params![stream_id, caller],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(Members {
+        count: usize::try_from(count).unwrap_or(usize::MAX),
+        includes_caller,
+    })
+}
+
+fn access(conn: &Connection, stream_id: i64, caller: Option<&str>) -> Result<(), ToolError> {
+    policy::admit(members(conn, stream_id, caller)?, caller)
+}
+
 fn exceeds_bounds(required: u64, max_bytes: u64, ack: Option<&AckResult>) -> ToolError {
     let mut details = json!({"max_bytes": max_bytes, "required_bytes": required});
     if let Some(ack) = ack {
@@ -1637,6 +1877,7 @@ fn event(row: &Row<'_>) -> Result<EventEnvelope, ToolError> {
         payload: serde_json::from_str(&payload).map_err(|error| {
             ToolError::internal(format!("a stored payload is not JSON: {error}"))
         })?,
+        publisher: row.get(4)?,
     })
 }
 
@@ -1661,7 +1902,7 @@ mod tests {
             conn.pragma_update(None, "foreign_keys", "ON").unwrap();
             conn.execute_batch(SCHEMA).unwrap();
             let mut store = Store { conn };
-            store.create_stream("orders").unwrap();
+            store.create_stream("orders", None, None).unwrap();
             let SubscriptionResult::Created { handle, .. } =
                 store.create_subscription("orders", "reader").unwrap()
             else {
@@ -1675,10 +1916,12 @@ mod tests {
                     sender_label: None,
                     recipient_label: None,
                     ack: None,
+                    publisher: None,
+                    claims: None,
                     digest: b"first",
                 })
                 .unwrap();
-            let admission = store.admit(&handle, None, true).unwrap();
+            let admission = store.admit(&handle, None, None, true).unwrap();
             let bounds = Bounds {
                 max_events: 10,
                 max_bytes: RESULT_LIMIT,
@@ -1689,9 +1932,9 @@ mod tests {
                 panic!("sealed batch");
             };
             if delete {
-                store.delete_subscription("orders", "reader").unwrap();
+                store.delete_subscription("orders", None, "reader").unwrap();
             } else {
-                store.admit(&handle, None, true).unwrap();
+                store.admit(&handle, None, None, true).unwrap();
             }
             let result = store
                 .release(

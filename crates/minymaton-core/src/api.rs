@@ -15,6 +15,23 @@ pub enum StreamArgs {
     Create {
         /// The stream's name: 1 to 128 bytes, without control characters.
         name: String,
+        /// Makes the stream private: only these callers, plus the creating
+        /// caller, may use it. Callers are the names enrolled with the
+        /// server's bearer tokens. Omit for a stream open to every caller.
+        members: Option<Vec<String>>,
+    },
+    /// Admits another caller to a private stream. Any member may grant.
+    Grant {
+        name: String,
+        /// The caller to admit, as enrolled with the server's bearer tokens.
+        caller: String,
+    },
+    /// Removes a caller from a private stream. Any member may revoke; the
+    /// last member cannot be removed.
+    Revoke {
+        name: String,
+        /// The caller to remove.
+        caller: String,
     },
     List {
         /// Return names strictly after this name, from a previous page.
@@ -29,6 +46,10 @@ pub enum StreamArgs {
 pub enum StreamResult {
     /// The stream now exists.
     Created { stream: String },
+    /// The caller is a member of the private stream.
+    Granted { stream: String, caller: String },
+    /// The caller is no longer a member of the private stream.
+    Revoked { stream: String, caller: String },
     Listed {
         streams: Vec<String>,
         next_after: Option<String>,
@@ -230,6 +251,11 @@ pub struct PublishArgs {
     /// Optional `ack_after_handling` batch ID from a handled receive batch on
     /// this stream, acknowledged atomically in the same transaction as this publish.
     pub ack: Option<String>,
+    /// Optional `message_id` of an earlier message on this stream, such as a
+    /// job ask, that this publish claims for its sender (`from` is required).
+    /// Only the first claim of a message commits; a later one fails with
+    /// `already_claimed`, naming the winner, and commits nothing.
+    pub claims: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -311,6 +337,10 @@ pub struct EventEnvelope {
     pub published_at: String,
     /// The published message, exactly as it was published.
     pub payload: Value,
+    /// The authenticated caller that published it, by its bearer token.
+    /// Absent when the server runs without bearer authentication.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publisher: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
