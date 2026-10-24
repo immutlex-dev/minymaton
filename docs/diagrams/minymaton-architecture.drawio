@@ -1,0 +1,279 @@
+<?xml version="1.0"?>
+<mxfile host="app.diagrams.net">
+  <diagram id="minymaton-arch" name="Architecture L1.5">
+    <mxGraphModel dx="1600" dy="1400" grid="1" gridSize="10" page="1" pageScale="1" pageWidth="2530" pageHeight="1410" background="#FFFFFF" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="title" value="&lt;b&gt;minymaton&lt;/b&gt; &#x2014; L1.5 architecture: event-driven MCP message bus &amp;amp; QueueStore / QueueReader durable queue" style="text;html=1;fontSize=21;align=left;verticalAlign=middle;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="30" y="16" width="2380" height="32" as="geometry"/>
+        </mxCell>
+        <mxCell id="subtitle" value="Streamable HTTP MCP (2025-06-18 &#xB7; 2025-11-25 &#xB7; 2026-07-28) &#xB7; Queue dispatches via QueueStore &amp;amp; QueueReader &#xB7; Signals &amp;amp; minymaton-wait wait on events, not polling timers" style="text;html=1;fontSize=13;fontColor=#475569;align=left;verticalAlign=middle;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="30" y="48" width="2380" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="C" value="MCP Clients, Agent Harnesses &amp;amp; CLI" style="rounded=1;whiteSpace=wrap;html=1;arcSize=2;fillColor=#eff6ff;strokeColor=#2563eb;verticalAlign=top;align=left;spacingLeft=12;spacingTop=6;fontStyle=1;fontSize=14;container=1;collapsible=0;dashed=0;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="30" y="90" width="330" height="540" as="geometry"/>
+        </mxCell>
+        <mxCell id="c1" value="&lt;b&gt;Interactive AI Agent Harnesses&lt;/b&gt;&lt;br&gt;Copilot CLI &#xB7; Claude Code &#xB7; Codex CLI &#xB7;&lt;br&gt;Antigravity (agy) &#xB7; Grok CLI&lt;br&gt;Linux, macOS, Windows (x86_64 &amp;amp; aarch64) over HTTP;&lt;br&gt;no shared client filesystem or local SQLite;&lt;br&gt;&lt;i&gt;join agents, claim agent-N + metadata&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#dbeafe;strokeColor=#2563eb;fontSize=12;verticalAlign=middle;spacing=6;fontFamily=Helvetica;" vertex="1" parent="C">
+          <mxGeometry x="20" y="45" width="290" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="c2" value="&lt;b&gt;minymaton-wait&lt;/b&gt; (Rust 6 targets) &amp;amp; &lt;b&gt;minymaton-wait.py&lt;/b&gt;&lt;br&gt;&lt;i&gt;--url --handle --ack --max-events --max-bytes&lt;/i&gt;&lt;br&gt;&lt;i&gt;--ca-file --config --token-env&lt;/i&gt; (CLI &amp;gt; env &amp;gt; INI)&lt;br&gt;OS / Windows CryptoAPI (ROOT+CA) + SSL_CERT_FILE/DIR;&lt;br&gt;sessionless 2026-07-28 &lt;i&gt;tools/call&lt;/i&gt;; exit 0 on batch;&lt;br&gt;install: &lt;i&gt;cargo install minymaton-server&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#dbeafe;strokeColor=#2563eb;fontSize=12;verticalAlign=middle;spacing=6;fontFamily=Helvetica;" vertex="1" parent="C">
+          <mxGeometry x="20" y="210" width="290" height="135" as="geometry"/>
+        </mxCell>
+        <mxCell id="c3" value="&lt;b&gt;Named Agent &amp;amp; Operator Clients&lt;/b&gt;&lt;br&gt;&#x2022; &lt;i&gt;/mcp/agent/{agent}&lt;/i&gt;: &lt;i&gt;follow&lt;/i&gt; + tool delivery&lt;br&gt;&#x2022; Optional inbox resource subscribers&lt;br&gt;&#x2022; &lt;b&gt;tools/mcp_send.py&lt;/b&gt; (CLI publisher)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#dbeafe;strokeColor=#2563eb;fontSize=12;verticalAlign=middle;spacing=6;fontFamily=Helvetica;" vertex="1" parent="C">
+          <mxGeometry x="20" y="380" width="290" height="135" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_wake_turn" value="completion wakes supporting harness" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;rounded=1;fontFamily=Helvetica;strokeColor=#2563eb;strokeWidth=2;dashed=1;endArrow=block;endFill=1;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="C" source="c2" target="c1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="CRED" value="Private Host Credential &amp;amp; Config Stores" style="rounded=1;whiteSpace=wrap;html=1;arcSize=2;fillColor=#fff7ed;strokeColor=#d97706;verticalAlign=top;align=left;spacingLeft=12;spacingTop=6;fontStyle=1;fontSize=14;container=1;collapsible=0;dashed=1;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="30" y="665" width="330" height="295" as="geometry"/>
+        </mxCell>
+        <mxCell id="k2" value="&lt;b&gt;Waiter CLI, Env &amp;amp; INI Config&lt;/b&gt; (Harness-Decoupled)&lt;br&gt;CLI &amp;gt; &lt;i&gt;MINYMATON_*&lt;/i&gt; env &amp;gt; &lt;i&gt;config.ini&lt;/i&gt; (&lt;i&gt;[minymaton]&lt;/i&gt; + &lt;i&gt;[DEFAULT]&lt;/i&gt;)&lt;br&gt;Required &lt;i&gt;--url / MINYMATON_URL / url&lt;/i&gt;;&lt;br&gt;Explicit &lt;i&gt;--token-env / token_env&lt;/i&gt; fails closed (exit 1);&lt;br&gt;never reads client harness JSON or &lt;i&gt;argv&lt;/i&gt; secrets" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#ffedd5;strokeColor=#d97706;fontSize=12;verticalAlign=middle;spacing=6;fontFamily=Helvetica;" vertex="1" parent="CRED">
+          <mxGeometry x="20" y="40" width="290" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="k1" value="&lt;b&gt;tokens.conf&lt;/b&gt; (&lt;i&gt;--bearer-token-file&lt;/i&gt;, 0600)&lt;br&gt;named bearer secrets; hashed to&lt;br&gt;SHA-256 digests on load; rejected if group&lt;br&gt;or world accessible on Unix" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#ffedd5;strokeColor=#d97706;fontSize=12;verticalAlign=middle;spacing=6;fontFamily=Helvetica;" vertex="1" parent="CRED">
+          <mxGeometry x="20" y="170" width="290" height="105" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_cred_client" value="URL + bearer" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;rounded=1;fontFamily=Helvetica;strokeColor=#d97706;strokeWidth=2;dashed=1;dashPattern=2 3;endArrow=diamond;endFill=1;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="1" source="CRED" target="C">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="S" value="minymaton-server &#x2014; Loopback Streamable HTTP MCP Server (127.0.0.1:18990)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=2;fillColor=#f5f3ff;strokeColor=#7c3aed;verticalAlign=top;align=left;spacingLeft=12;spacingTop=6;fontStyle=1;fontSize=14;container=1;collapsible=0;dashed=0;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="500" y="90" width="660" height="870" as="geometry"/>
+        </mxCell>
+        <mxCell id="s_init" value="&lt;b&gt;Axum /mcp &amp;amp; Dynamic Instructions&lt;/b&gt;&lt;br&gt;2025 MCP: &lt;i&gt;LocalSessionManager&lt;/i&gt;;&lt;br&gt;2026-07-28: sessionless requests;&lt;br&gt;instructions reflect exposed tools per route;&lt;br&gt;&lt;b&gt;request cancellation / socket disconnect&lt;/b&gt;&lt;br&gt;cancels receive and drops parked WaitGuard" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#ede9fe;strokeColor=#7c3aed;fontSize=12;verticalAlign=middle;spacing=6;fontFamily=Helvetica;" vertex="1" parent="S">
+          <mxGeometry x="25" y="45" width="280" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="s_wire" value="&lt;b&gt;Wire Budget &amp;amp; Dual-Copy Framing&lt;/b&gt;&lt;br&gt;(&lt;i&gt;minymaton-core/src/wire.rs&lt;/i&gt;)&lt;br&gt;caps &lt;i&gt;max_bytes &#x2264; 16384&lt;/i&gt; (16 KiB);&lt;br&gt;measures serialized JSON envelope across&lt;br&gt;&lt;i&gt;structuredContent&lt;/i&gt; + &lt;i&gt;content[0].text&lt;/i&gt; (2&#xD7; copy)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#ede9fe;strokeColor=#7c3aed;fontSize=12;verticalAlign=middle;spacing=6;fontFamily=Helvetica;" vertex="1" parent="S">
+          <mxGeometry x="355" y="45" width="280" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="s_core" value="&lt;b&gt;Core Bus Tools&lt;/b&gt; (&lt;i&gt;tools.rs&lt;/i&gt;)&lt;br&gt;&#x2022; &lt;b&gt;stream&lt;/b&gt;: &lt;i&gt;create | list&lt;/i&gt;&lt;br&gt;&#x2022; &lt;b&gt;subscription&lt;/b&gt;: &lt;i&gt;create | recover | delete | list&lt;/i&gt;&lt;br&gt;&#x2022; &lt;b&gt;publish&lt;/b&gt;: &lt;i&gt;payload, from, to, ack&lt;/i&gt; (atomic tx)&lt;br&gt;&#x2022; &lt;b&gt;receive&lt;/b&gt;: &lt;i&gt;handle, ack, wait: bool&lt;/i&gt; (no timers)&lt;br&gt;Flat &lt;b&gt;action enum&lt;/b&gt; + per-action descriptions" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#ede9fe;strokeColor=#7c3aed;fontSize=12;verticalAlign=middle;spacing=6;fontFamily=Helvetica;" vertex="1" parent="S">
+          <mxGeometry x="25" y="210" width="280" height="135" as="geometry"/>
+        </mxCell>
+        <mxCell id="s_modes" value="&lt;b&gt;At-Least-Once Batch / ACK Ownership&lt;/b&gt;&lt;br&gt;&lt;b&gt;ACK only after handling&lt;/b&gt;;&lt;br&gt;&lt;i&gt;publish(ack)&lt;/i&gt; or &lt;i&gt;receive(max_events: 0, ack)&lt;/i&gt;&lt;br&gt;preserves parked receive ownership;&lt;br&gt;ACK-only receive omits wait + max_bytes;&lt;br&gt;any receiving call supersedes prior waiter" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#ede9fe;strokeColor=#7c3aed;fontSize=12;verticalAlign=middle;spacing=6;fontFamily=Helvetica;" vertex="1" parent="S">
+          <mxGeometry x="355" y="210" width="280" height="135" as="geometry"/>
+        </mxCell>
+        <mxCell id="s_agent" value="&lt;b&gt;Bound Agent &amp;amp; Delivery Tools&lt;/b&gt; (&lt;i&gt;tools.rs&lt;/i&gt;)&lt;br&gt;&#x2022; &lt;b&gt;follow&lt;/b&gt;: binds &lt;i&gt;/mcp/agent/{agent}&lt;/i&gt; handle&lt;br&gt;&#x2022; &lt;b&gt;ack&lt;/b&gt;: commits batch in description/tools mode&lt;br&gt;&#x2022; &lt;b&gt;message_{batch_id}&lt;/b&gt;: dynamic per-batch tool&lt;br&gt;  injected when &lt;i&gt;--delivery tools&lt;/i&gt; is active" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#ede9fe;strokeColor=#7c3aed;fontSize=12;verticalAlign=middle;spacing=6;fontFamily=Helvetica;" vertex="1" parent="S">
+          <mxGeometry x="25" y="380" width="280" height="135" as="geometry"/>
+        </mxCell>
+        <mxCell id="s_push" value="&lt;b&gt;Session Pushes &amp;amp; Inbox Resource&lt;/b&gt;&lt;br&gt;(&lt;i&gt;tools.rs :: Pushes&lt;/i&gt;)&lt;br&gt;&lt;i&gt;minymaton://inbox/{handle}&lt;/i&gt; resource read;&lt;br&gt;watches &lt;i&gt;Queue::watch_inbox&lt;/i&gt; &#x2192; pushes&lt;br&gt;&lt;i&gt;resources/updated&lt;/i&gt; &amp;amp; &lt;i&gt;tools/list_changed&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#ede9fe;strokeColor=#7c3aed;fontSize=12;verticalAlign=middle;spacing=6;fontFamily=Helvetica;" vertex="1" parent="S">
+          <mxGeometry x="355" y="380" width="280" height="135" as="geometry"/>
+        </mxCell>
+        <mxCell id="s_lint" value="&lt;b&gt;Compile-Time Policy Enforcement&lt;/b&gt; (&lt;i&gt;tools/compiler-lints&lt;/i&gt; &#x2014; rustc HIR driver)&lt;br&gt;rejects lint suppression attributes and internal timed waits / readiness polling;&lt;br&gt;normal build, Clippy and CI paths cover workspace library, binary and integration test targets" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#ede9fe;strokeColor=#7c3aed;fontSize=12;verticalAlign=middle;spacing=6;fontFamily=Helvetica;" vertex="1" parent="S">
+          <mxGeometry x="25" y="555" width="610" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="s_auth" value="&lt;b&gt;BearerAuthenticator &amp;amp; RequestLog Middleware&lt;/b&gt; (&lt;i&gt;auth.rs&lt;/i&gt;, &lt;i&gt;request_log.rs&lt;/i&gt;)&lt;br&gt;&#x2022; Constant-time SHA-256 comparison against loaded token digests on every HTTP request&lt;br&gt;&#x2022; Optional structured JSONL request log (&lt;i&gt;--request-log&lt;/i&gt;) recording method, route, status, and principal&lt;br&gt;&#x2022; &lt;i&gt;rmcp 3.1.4&lt;/i&gt; Streamable HTTP config with &lt;i&gt;sse_keep_alive: None&lt;/i&gt; and &lt;i&gt;sse_retry: None&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#ede9fe;strokeColor=#7c3aed;fontSize=12;verticalAlign=middle;spacing=6;fontFamily=Helvetica;" vertex="1" parent="S">
+          <mxGeometry x="25" y="705" width="610" height="140" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_s_disp" value="dispatch" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;rounded=1;fontFamily=Helvetica;strokeColor=#1f2937;strokeWidth=2;endArrow=block;endFill=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="S" source="s_init" target="s_core">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_s_mode" value="" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;rounded=1;fontFamily=Helvetica;strokeColor=#1f2937;strokeWidth=2;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="S" source="s_core" target="s_modes">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_s_ag" value="" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;rounded=1;fontFamily=Helvetica;strokeColor=#1f2937;strokeWidth=2;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="S" source="s_agent" target="s_push">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_c1_s" value="POST /mcp&lt;br&gt;initialize &#xB7; tools" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;rounded=1;fontFamily=Helvetica;strokeColor=#1f2937;strokeWidth=2;startArrow=block;endArrow=block;startFill=1;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="c1" target="s_init">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_c2_s" value="sessionless tools/call&lt;br&gt;receive(wait: true)" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;rounded=1;fontFamily=Helvetica;strokeColor=#1f2937;strokeWidth=2;startArrow=block;endArrow=block;startFill=1;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="c2" target="s_core">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_c3_s_req" value="follow &#xB7; publish &#xB7; ack" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;rounded=1;fontFamily=Helvetica;strokeColor=#1f2937;strokeWidth=2;startArrow=block;endArrow=block;startFill=1;endFill=1;exitX=1;exitY=0.3;entryX=0;entryY=0.3;" edge="1" parent="1" source="c3" target="s_agent">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_c3_s_sse" value="SSE notifications" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;rounded=1;fontFamily=Helvetica;strokeColor=#2563eb;strokeWidth=2;dashed=1;endArrow=block;endFill=1;exitX=0;exitY=0.72;entryX=1;entryY=0.72;" edge="1" parent="1" source="s_agent" target="c3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_k1_auth" value="SHA-256 digests" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;rounded=1;fontFamily=Helvetica;strokeColor=#d97706;strokeWidth=2;dashed=1;dashPattern=2 3;endArrow=diamond;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.66;" edge="1" parent="1" source="k1" target="s_auth">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="Q" value="minymaton-core &#x2014; Queue, Signals, QueueStore &amp;amp; QueueReader" style="rounded=1;whiteSpace=wrap;html=1;arcSize=2;fillColor=#ecfdf5;strokeColor=#059669;verticalAlign=top;align=left;spacingLeft=12;spacingTop=6;fontStyle=1;fontSize=14;container=1;collapsible=0;dashed=0;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="90" width="620" height="870" as="geometry"/>
+        </mxCell>
+        <mxCell id="q_coord" value="&lt;b&gt;Queue Coordinator&lt;/b&gt; (&lt;i&gt;queue.rs :: Queue&lt;/i&gt; &#xB7; &lt;i&gt;Queue::open / with_backend&lt;/i&gt;)&lt;br&gt;&lt;b&gt;Typed serde validation&lt;/b&gt;: required fields + valid action/field combinations (&lt;i&gt;api.rs&lt;/i&gt;);&lt;br&gt;parks &lt;i&gt;receive(wait: true)&lt;/i&gt; on &lt;i&gt;Signals&lt;/i&gt; outside &lt;i&gt;QueueStore&lt;/i&gt; writer lock;&lt;br&gt;ACK-only &lt;i&gt;publish(ack)&lt;/i&gt; / &lt;i&gt;receive(max_events: 0, ack)&lt;/i&gt; takes no receive ownership;&lt;br&gt;receiving calls (including &lt;i&gt;wait: false&lt;/i&gt;) supersede the prior owner" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#d1fae5;strokeColor=#059669;fontSize=12;verticalAlign=middle;spacing=6;fontFamily=Helvetica;" vertex="1" parent="Q">
+          <mxGeometry x="25" y="45" width="570" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="q_sig" value="&lt;b&gt;Event Signals &amp;amp; Process-Local Wait Observation&lt;/b&gt; (&lt;i&gt;signals.rs :: Signals&lt;/i&gt;)&lt;br&gt;&#x2022; &lt;b&gt;commits&lt;/b&gt;: per-stream &lt;i&gt;tokio::sync::watch&amp;lt;u64&amp;gt;&lt;/i&gt;; wake means check stored state again&lt;br&gt;&#x2022; &lt;b&gt;owners&lt;/b&gt;: per-subscription generation; newer receive supersedes; deletion wakes waiter&lt;br&gt;&#x2022; &lt;b&gt;WaitGuard&lt;/b&gt;: enter / drop updates &lt;i&gt;waiting&lt;/i&gt; and active-count watch channel&lt;br&gt;&#x2022; &lt;i&gt;waiting&lt;/i&gt; is instantaneous, not a durable reservation or proof remote client is alive" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#d1fae5;strokeColor=#059669;fontSize=12;verticalAlign=middle;spacing=6;fontFamily=Helvetica;" vertex="1" parent="Q">
+          <mxGeometry x="25" y="210" width="570" height="135" as="geometry"/>
+        </mxCell>
+        <mxCell id="q_writer" value="&lt;b&gt;QueueStore Trait &amp;amp; Bundled SQLite Store&lt;/b&gt; (&lt;i&gt;store.rs :: QueueStore / Mutex&amp;lt;Store&amp;gt;&lt;/i&gt;)&lt;br&gt;&#x2022; &lt;b&gt;Atomic commands&lt;/b&gt;: &lt;i&gt;create_stream, claim/recover/delete_subscription, follow_stream, ensure_subscription&lt;/i&gt;&lt;br&gt;&#x2022; &lt;b&gt;publish + ack&lt;/b&gt; &amp;amp; &lt;b&gt;admit / select&lt;/b&gt;: idempotency, self-echo suppression, direct addressing, batch sealing&lt;br&gt;&#x2022; &lt;b&gt;QueueStore::release&lt;/b&gt; (&lt;i&gt;Store::release&lt;/i&gt;): rechecks subscription + &lt;i&gt;owner_generation&lt;/i&gt; before recording attempt;&lt;br&gt;&#x2022; &lt;b&gt;Delivery queries&lt;/b&gt;: &lt;i&gt;read_inbox, read_description, pending_description&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#d1fae5;strokeColor=#059669;fontSize=12;verticalAlign=middle;spacing=6;fontFamily=Helvetica;" vertex="1" parent="Q">
+          <mxGeometry x="25" y="390" width="570" height="145" as="geometry"/>
+        </mxCell>
+        <mxCell id="q_reader" value="&lt;b&gt;QueueReader Trait &amp;amp; Bundled SQLite Reader&lt;/b&gt; (&lt;i&gt;store.rs :: QueueReader / Mutex&amp;lt;Reader&amp;gt;&lt;/i&gt;)&lt;br&gt;read-only snapshot queries (&lt;i&gt;SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX&lt;/i&gt;) &#x2014; never blocks writer:&lt;br&gt;&#x2022; &lt;b&gt;list_streams&lt;/b&gt; &amp;amp; &lt;b&gt;list_subscriptions&lt;/b&gt; (live roster + &lt;i&gt;metadata&lt;/i&gt; + &lt;i&gt;last_active_at&lt;/i&gt; + &lt;i&gt;waiting&lt;/i&gt;)&lt;br&gt;&#x2022; &lt;b&gt;agent_binding&lt;/b&gt;, &lt;b&gt;inbox_unread&lt;/b&gt;, and &lt;b&gt;inbox&lt;/b&gt; for &lt;i&gt;/mcp/agent/{agent}&lt;/i&gt; &amp;amp; inbox resources" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#d1fae5;strokeColor=#059669;fontSize=12;verticalAlign=middle;spacing=6;fontFamily=Helvetica;" vertex="1" parent="Q">
+          <mxGeometry x="25" y="580" width="570" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="q_ids" value="&lt;b&gt;CSPRNG Identifiers &amp;amp; Subscription Lifecycle&lt;/b&gt; (&lt;i&gt;ids.rs&lt;/i&gt;, &lt;i&gt;store.rs&lt;/i&gt;)&lt;br&gt;128-bit random hex IDs (&lt;i&gt;sub_&#x2026;&lt;/i&gt;, &lt;i&gt;msg_&#x2026;&lt;/i&gt;, &lt;i&gt;bat_&#x2026;&lt;/i&gt;); atomic &lt;i&gt;agent-N&lt;/i&gt; smallest-free label claim;&lt;br&gt;&lt;i&gt;start_at: &amp;quot;latest&amp;quot; | &amp;quot;earliest&amp;quot;&lt;/i&gt; cursor initialization; &lt;i&gt;action: &amp;quot;delete&amp;quot;&lt;/i&gt; cascade freeing retired labels" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#d1fae5;strokeColor=#059669;fontSize=12;verticalAlign=middle;spacing=6;fontFamily=Helvetica;" vertex="1" parent="Q">
+          <mxGeometry x="25" y="735" width="570" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_q_wait" value="Waiter park &#xB7; commit / supersede wakeup" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;rounded=1;fontFamily=Helvetica;strokeColor=#2563eb;strokeWidth=2;dashed=1;endArrow=block;endFill=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="Q" source="q_coord" target="q_sig">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_q_sig_w" value="notify_commit after tx" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;rounded=1;fontFamily=Helvetica;strokeColor=#2563eb;strokeWidth=2;dashed=1;endArrow=block;endFill=1;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="Q" source="q_writer" target="q_sig">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_wire_q" value="16 KiB frame check" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;rounded=1;fontFamily=Helvetica;strokeColor=#1f2937;strokeWidth=2;startArrow=block;endArrow=block;startFill=1;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="s_wire" target="q_coord">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_modes_q" value="publish &#xB7; receive&lt;br&gt;stream &#xB7; subscription" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;rounded=1;fontFamily=Helvetica;strokeColor=#1f2937;strokeWidth=2;endArrow=block;endFill=1;exitX=1;exitY=0.35;entryX=0.3;entryY=1;" edge="1" parent="1" source="s_modes" target="q_coord">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1190" y="347"/>
+              <mxPoint x="1190" y="275"/>
+              <mxPoint x="1496" y="275"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_sig_push" value="watch_inbox /&lt;br&gt;tools_changed" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;rounded=1;fontFamily=Helvetica;strokeColor=#2563eb;strokeWidth=2;dashed=1;endArrow=block;endFill=1;exitX=0;exitY=0.78;entryX=1;entryY=0.5;" edge="1" parent="1" source="q_sig" target="s_push">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1230" y="395"/>
+              <mxPoint x="1230" y="537"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="D" value="Durable Storage &amp;amp; Capacity Guard (SQLite WAL OSS / Pluggable Seam)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=2;fillColor=#fffbeb;strokeColor=#d97706;verticalAlign=top;align=left;spacingLeft=12;spacingTop=6;fontStyle=1;fontSize=14;container=1;collapsible=0;dashed=0;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="2060" y="90" width="440" height="645" as="geometry"/>
+        </mxCell>
+        <mxCell id="d_schema" value="&lt;b&gt;QueueStore / QueueReader State&lt;/b&gt; (&lt;i&gt;store.rs&lt;/i&gt;)&lt;br&gt;&#x2022; &lt;b&gt;streams&lt;/b&gt; &amp;amp; &lt;b&gt;subscriptions&lt;/b&gt; (&lt;i&gt;committed_sequence, owner_generation, metadata&lt;/i&gt;)&lt;br&gt;&#x2022; &lt;b&gt;events&lt;/b&gt; (&lt;i&gt;sequence, payload, sender_label, recipient_label&lt;/i&gt;)&lt;br&gt;&#x2022; &lt;b&gt;batches&lt;/b&gt;, &lt;b&gt;batch_aliases&lt;/b&gt;, &lt;b&gt;publishes&lt;/b&gt;&lt;br&gt;&#x2022; &lt;b&gt;agents&lt;/b&gt; &amp;amp; &lt;b&gt;agent_subscriptions&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#fef3c7;strokeColor=#d97706;fontSize=12;verticalAlign=middle;spacing=6;fontFamily=Helvetica;" vertex="1" parent="D">
+          <mxGeometry x="25" y="45" width="390" height="175" as="geometry"/>
+        </mxCell>
+        <mxCell id="d_db" value="&lt;b&gt;minymaton.sqlite3 (Deployed OSS, mode 0600)&lt;/b&gt;&lt;br&gt;&lt;i&gt;journal_mode = WAL &#xB7; synchronous = FULL&lt;/i&gt;&lt;br&gt;&lt;i&gt;foreign_keys = ON &#xB7; busy_timeout = 0&lt;/i&gt;&lt;br&gt;&lt;br&gt;Bundled &lt;i&gt;Store&lt;/i&gt; + &lt;i&gt;Reader&lt;/i&gt; implement &lt;i&gt;QueueStore&lt;/i&gt; + &lt;i&gt;QueueReader&lt;/i&gt;;&lt;br&gt;&lt;i&gt;Queue::with_backend&lt;/i&gt; seam for other backends" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;size=14;fillColor=#fef3c7;strokeColor=#d97706;fontSize=12;fontFamily=Helvetica;" vertex="1" parent="D">
+          <mxGeometry x="25" y="255" width="390" height="225" as="geometry"/>
+        </mxCell>
+        <mxCell id="d_ops" value="&lt;b&gt;minymaton-storage-check&lt;/b&gt; &amp;amp; &lt;b&gt;storage.json&lt;/b&gt; (&lt;i&gt;deploy/&lt;/i&gt;)&lt;br&gt;systemd &lt;i&gt;.timer&lt;/i&gt; checks &lt;i&gt;statvfs&lt;/i&gt; available blocks on DB volume;&lt;br&gt;records state in fixed-size &lt;i&gt;storage.json&lt;/i&gt; slot &amp;amp; posts edge-triggered&lt;br&gt;alert when free space &amp;lt; 10% via &lt;i&gt;curl --config -&lt;/i&gt; (URL on stdin)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#fef3c7;strokeColor=#d97706;fontSize=12;verticalAlign=middle;spacing=6;fontFamily=Helvetica;" vertex="1" parent="D">
+          <mxGeometry x="25" y="515" width="390" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_schema_db" value="" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;rounded=1;fontFamily=Helvetica;strokeColor=#1f2937;strokeWidth=2;endArrow=block;endFill=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="D" source="d_schema" target="d_db">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_ops_db" value="statvfs check" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;rounded=1;fontFamily=Helvetica;strokeColor=#d97706;strokeWidth=2;dashed=1;dashPattern=2 3;endArrow=diamond;endFill=1;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="D" source="d_ops" target="d_db">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_writer_db" value="BEGIN IMMEDIATE&lt;br&gt;write tx + fsync" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;rounded=1;fontFamily=Helvetica;strokeColor=#059669;strokeWidth=2.5;endArrow=block;endFill=1;exitX=1;exitY=0.15;entryX=0;entryY=0.697;" edge="1" parent="1" source="q_writer" target="d_db">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_reader_db" value="SQLITE_OPEN_READ_ONLY&lt;br&gt;WAL snapshot read" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;rounded=1;fontFamily=Helvetica;strokeColor=#7c3aed;strokeWidth=2;dashed=1;endArrow=open;endSize=10;exitX=1;exitY=0.5;entryX=0;entryY=0.9;" edge="1" parent="1" source="q_reader" target="d_db">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1990" y="735"/>
+              <mxPoint x="1990" y="548"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="LG" value="Legend" style="rounded=1;whiteSpace=wrap;html=1;arcSize=2;fillColor=#ffffff;strokeColor=#94a3b8;verticalAlign=top;align=left;spacingLeft=12;spacingTop=6;fontStyle=1;fontSize=14;container=1;collapsible=0;dashed=0;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="2060" y="755" width="440" height="205" as="geometry"/>
+        </mxCell>
+        <mxCell id="la0" value="" style="text;html=1;" vertex="1" parent="LG">
+          <mxGeometry x="18" y="45" width="1" height="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="lb0" value="" style="text;html=1;" vertex="1" parent="LG">
+          <mxGeometry x="82" y="45" width="1" height="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="le0" value="" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;rounded=1;fontFamily=Helvetica;strokeColor=#1f2937;strokeWidth=2;startArrow=block;endArrow=block;startFill=1;endFill=1;" edge="1" parent="LG" source="la0" target="lb0">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="lt0" value="MCP HTTP request / response (JSON-RPC)" style="text;html=1;fontSize=11;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Helvetica;" vertex="1" parent="LG">
+          <mxGeometry x="95" y="33" width="330" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="la1" value="" style="text;html=1;" vertex="1" parent="LG">
+          <mxGeometry x="18" y="78" width="1" height="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="lb1" value="" style="text;html=1;" vertex="1" parent="LG">
+          <mxGeometry x="82" y="78" width="1" height="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="le1" value="" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;rounded=1;fontFamily=Helvetica;strokeColor=#2563eb;strokeWidth=2;dashed=1;endArrow=block;endFill=1;" edge="1" parent="LG" source="la1" target="lb1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="lt1" value="Event-driven wakeup / SSE push notification" style="text;html=1;fontSize=11;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Helvetica;" vertex="1" parent="LG">
+          <mxGeometry x="95" y="66" width="330" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="la2" value="" style="text;html=1;" vertex="1" parent="LG">
+          <mxGeometry x="18" y="111" width="1" height="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="lb2" value="" style="text;html=1;" vertex="1" parent="LG">
+          <mxGeometry x="82" y="111" width="1" height="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="le2" value="" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;rounded=1;fontFamily=Helvetica;strokeColor=#059669;strokeWidth=2.5;endArrow=block;endFill=1;" edge="1" parent="LG" source="la2" target="lb2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="lt2" value="QueueStore atomic command / WAL write tx" style="text;html=1;fontSize=11;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Helvetica;" vertex="1" parent="LG">
+          <mxGeometry x="95" y="99" width="330" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="la3" value="" style="text;html=1;" vertex="1" parent="LG">
+          <mxGeometry x="18" y="144" width="1" height="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="lb3" value="" style="text;html=1;" vertex="1" parent="LG">
+          <mxGeometry x="82" y="144" width="1" height="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="le3" value="" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;rounded=1;fontFamily=Helvetica;strokeColor=#7c3aed;strokeWidth=2;dashed=1;endArrow=open;endSize=10;" edge="1" parent="LG" source="la3" target="lb3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="lt3" value="QueueReader lock-free snapshot query" style="text;html=1;fontSize=11;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Helvetica;" vertex="1" parent="LG">
+          <mxGeometry x="95" y="132" width="330" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="la4" value="" style="text;html=1;" vertex="1" parent="LG">
+          <mxGeometry x="18" y="177" width="1" height="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="lb4" value="" style="text;html=1;" vertex="1" parent="LG">
+          <mxGeometry x="82" y="177" width="1" height="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="le4" value="" style="html=1;fontSize=11;labelBackgroundColor=#ffffff;rounded=1;fontFamily=Helvetica;strokeColor=#d97706;strokeWidth=2;dashed=1;dashPattern=2 3;endArrow=diamond;endFill=1;" edge="1" parent="LG" source="la4" target="lb4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="lt4" value="Bearer credential &amp;amp; capacity state check" style="text;html=1;fontSize=11;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Helvetica;" vertex="1" parent="LG">
+          <mxGeometry x="95" y="165" width="330" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="L" value="Parked lifecycle &#x2014; one helper per handle; handle events before ACK; no automatic re-arm" style="rounded=1;whiteSpace=wrap;html=1;arcSize=2;fillColor=#f8fafc;strokeColor=#475569;verticalAlign=top;align=left;spacingLeft=12;spacingTop=8;fontStyle=1;fontSize=15;container=1;collapsible=0;fontFamily=Helvetica;" vertex="1" parent="1">
+          <mxGeometry x="30" y="1000" width="2470" height="370" as="geometry"/>
+        </mxCell>
+        <mxCell id="l_start" value="&lt;b&gt;1. Agent yields &#x2192; launch background waiter&lt;/b&gt;&lt;br&gt;Native Rust &lt;i&gt;minymaton-wait&lt;/i&gt; or Python 3 &lt;i&gt;minymaton-wait.py&lt;/i&gt;;&lt;br&gt;sessionless MCP 2026-07-28 headers + &lt;i&gt;_meta&lt;/i&gt;;&lt;br&gt;&lt;i&gt;receive(wait: true)&lt;/i&gt;, optional handled-batch ACK;&lt;br&gt;explicit &lt;i&gt;--url / MINYMATON_URL / --config&lt;/i&gt;; no initialize" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#dbeafe;strokeColor=#2563eb;fontSize=13;verticalAlign=middle;spacing=8;fontFamily=Helvetica;" vertex="1" parent="L">
+          <mxGeometry x="25" y="55" width="450" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="l_wait" value="&lt;b&gt;2. Server parks receive on explicit events&lt;/b&gt;&lt;br&gt;Signals commit / owner watch channels; outside QueueStore lock;&lt;br&gt;WaitGuard enters process-local &lt;i&gt;waiting&lt;/i&gt; observation;&lt;br&gt;&lt;i&gt;publish(ack)&lt;/i&gt; / &lt;i&gt;receive(max_events: 0, ack)&lt;/i&gt;&lt;br&gt;preserves parked owner (omit wait + max_bytes)" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#d1fae5;strokeColor=#059669;fontSize=13;verticalAlign=middle;spacing=8;fontFamily=Helvetica;" vertex="1" parent="L">
+          <mxGeometry x="620" y="55" width="500" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="l_release" value="&lt;b&gt;3. QueueStore::release rechecks owner before delivery&lt;/b&gt;&lt;br&gt;Check subscription exists + owner_generation in same tx;&lt;br&gt;only current owner records delivery attempt;&lt;br&gt;return complete JSON-RPC response (JSON or SSE);&lt;br&gt;helper exits &lt;b&gt;0&lt;/b&gt; with unacknowledged batch on stdout" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#d1fae5;strokeColor=#059669;fontSize=13;verticalAlign=middle;spacing=8;fontFamily=Helvetica;" vertex="1" parent="L">
+          <mxGeometry x="1260" y="55" width="500" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="l_handle" value="&lt;b&gt;4. Supporting harness observes command completion&lt;/b&gt;&lt;br&gt;Native task watcher wakes idle agent; MCP alone cannot;&lt;br&gt;handle events, deduplicate by batch_id, then ACK;&lt;br&gt;re-parking when idle remains agent-owned;&lt;br&gt;at-least-once delivery, not exactly-once handling" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#dbeafe;strokeColor=#2563eb;fontSize=13;verticalAlign=middle;spacing=8;fontFamily=Helvetica;" vertex="1" parent="L">
+          <mxGeometry x="1900" y="55" width="510" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="l_cancel" value="&lt;b&gt;Disconnect / cancellation &#x2192; WaitGuard drop&lt;/b&gt;&lt;br&gt;Request socket closes or MCP cancellation fires;&lt;br&gt;&lt;i&gt;context.ct.cancelled()&lt;/i&gt; drops parked receive;&lt;br&gt;guard drop updates active-count watch + waiting;&lt;br&gt;hard kill needs no helper finally / HTTP cleanup" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#ede9fe;strokeColor=#7c3aed;fontSize=13;verticalAlign=middle;spacing=8;fontFamily=Helvetica;" vertex="1" parent="L">
+          <mxGeometry x="620" y="230" width="500" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="l_terminal" value="&lt;b&gt;Terminal nonzero outcomes &#x2014; never auto-relaunch&lt;/b&gt;&lt;br&gt;&lt;b&gt;3&lt;/b&gt; superseded; &lt;b&gt;4&lt;/b&gt; batch gone; &lt;b&gt;5&lt;/b&gt; subscription missing;&lt;br&gt;&lt;b&gt;6&lt;/b&gt; bounds; &lt;b&gt;7&lt;/b&gt; HTTP / EOF; &lt;b&gt;1&lt;/b&gt; config / protocol / domain;&lt;br&gt;&lt;b&gt;130&lt;/b&gt; Ctrl+C; JSON stderr (&lt;b&gt;2&lt;/b&gt; argument usage instead);&lt;br&gt;resolve cause / ownership; avoid waiter takeover livelock" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#ffedd5;strokeColor=#d97706;fontSize=13;verticalAlign=middle;spacing=8;fontFamily=Helvetica;" vertex="1" parent="L">
+          <mxGeometry x="1260" y="230" width="500" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="l_limits" value="&lt;b&gt;Event-driven boundary&lt;/b&gt;&lt;br&gt;No sleeps, polling, retry timers or automatic re-arm;&lt;br&gt;foreground MCP receives remain client-timeout-bound;&lt;br&gt;half-open TCP without FIN/RST may block indefinitely;&lt;br&gt;&lt;i&gt;waiting&lt;/i&gt; does not prove a remote client is alive" style="rounded=1;whiteSpace=wrap;html=1;arcSize=6;fillColor=#f1f5f9;strokeColor=#64748b;fontSize=13;verticalAlign=middle;spacing=8;fontFamily=Helvetica;" vertex="1" parent="L">
+          <mxGeometry x="1900" y="230" width="510" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_l_request" value="tools/call" style="html=1;fontSize=12;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;fontFamily=Helvetica;strokeColor=#1f2937;strokeWidth=2;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="L" source="l_start" target="l_wait">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_l_commit" value="batch ready" style="html=1;fontSize=12;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;fontFamily=Helvetica;strokeColor=#059669;strokeWidth=2;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="L" source="l_wait" target="l_release">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_l_complete" value="exit + stdout" style="html=1;fontSize=12;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;fontFamily=Helvetica;strokeColor=#2563eb;strokeWidth=2;dashed=1;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="L" source="l_release" target="l_handle">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_l_cancel" value="EOF / cancel" style="html=1;fontSize=12;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;fontFamily=Helvetica;strokeColor=#7c3aed;strokeWidth=2;dashed=1;endArrow=block;endFill=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="L" source="l_wait" target="l_cancel">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_l_release_terminal" value="stale / failure" style="html=1;fontSize=12;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;fontFamily=Helvetica;strokeColor=#d97706;strokeWidth=2;endArrow=block;endFill=1;exitX=0.8;exitY=1;entryX=0.8;entryY=0;" edge="1" parent="L" source="l_release" target="l_terminal">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_l_terminal" value="superseded / error" style="html=1;fontSize=12;labelBackgroundColor=#ffffff;edgeStyle=orthogonalEdgeStyle;rounded=1;fontFamily=Helvetica;strokeColor=#d97706;strokeWidth=2;endArrow=block;endFill=1;exitX=1;exitY=0.9;entryX=0.5;entryY=0;" edge="1" parent="L" source="l_wait" target="l_terminal">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1190" y="163"/>
+              <mxPoint x="1190" y="205"/>
+              <mxPoint x="1510" y="205"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

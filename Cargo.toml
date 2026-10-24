@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = ["crates/minymaton-core", "crates/minymaton-server", "crates/minymaton"]
+
+[workspace.package]
+version = "0.1.6"
+edition = "2024"
+license = "AGPL-3.0-only"
+rust-version = "1.98"
+repository = "https://github.com/immutlex-dev/minymaton"
+homepage = "https://github.com/immutlex-dev/minymaton"
+keywords = ["mcp", "message-queue", "agents", "event-driven"]

@@ -1,0 +1,30 @@
+name: Rust
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install compiler components and publisher runtime
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal --component rustfmt,clippy,rustc-dev,rust-src,llvm-tools-preview
+          python -m pip install uv==0.12.7
+      - name: Bootstrap typed compiler enforcement
+        run: python tools/compiler-lints/bootstrap.py
+      - name: Formatting and Clippy
+        run: |
+          cargo fmt --all -- --check
+          rustfmt --edition 2024 --check tools/compiler-lints/*.rs
+          cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build integration executables
+        run: cargo test --workspace --no-run
+      - name: Real compiler, HTTP, storage and alert integrations
+        run: flock --close /tmp/agent-suite.lock timeout 360 cargo test --workspace -- --test-threads=1

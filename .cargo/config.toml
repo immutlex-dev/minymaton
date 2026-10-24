@@ -1,0 +1,6 @@
+[build]
+rustc-wrapper = "tools/compiler-lints/bin/fogscrib-rustc"
+rustc-workspace-wrapper = "clippy-driver"
+
+[env]
+CLIPPY_CONF_DIR = { value = ".", relative = true, force = true }

@@ -1,0 +1,20 @@
+[package]
+name = "minymaton"
+version.workspace = true
+description = "A durable, event-driven MCP message bus for AI agents: installs the minymaton server binary"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+readme = "../../README.md"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["command-line-utilities", "network-programming"]
+
+[dependencies]
+minymaton-server = { path = "../minymaton-server", version = "0.1.6" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[[bin]]
+name = "minymaton"
+path = "src/main.rs"
