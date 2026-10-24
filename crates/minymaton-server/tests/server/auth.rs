@@ -2,7 +2,7 @@
 
 use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE};
-use rmcp::model::{ClientCapabilities, ClientInfo, Implementation, ProtocolVersion};
+use rmcp::model::{ClientCapabilities, ClientConfig, Implementation, ProtocolVersion};
 use serde_json::json;
 
 use crate::common::{Lifecycle, Server, payloads, receive_args};
@@ -15,7 +15,7 @@ fn initialize_body() -> String {
         "jsonrpc": "2.0",
         "id": 0,
         "method": "initialize",
-        "params": ClientInfo::new(
+        "params": ClientConfig::new(
             ClientCapabilities::default(),
             Implementation::new("auth-test", "0"),
         ).with_protocol_version(ProtocolVersion::V_2025_11_25),

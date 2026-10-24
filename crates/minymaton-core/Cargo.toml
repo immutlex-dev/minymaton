@@ -14,7 +14,7 @@ categories = ["database", "asynchronous"]
 [dependencies]
 getrandom = "0.3"
 humantime = "2"
-rmcp = { version = "=3.1.4", default-features = false }
+rmcp = { version = "*", default-features = false }
 rusqlite = { version = "0.37", features = ["bundled"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

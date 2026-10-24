@@ -7,6 +7,28 @@ fn lifecycle() -> Lifecycle {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unbound_modern_catalogs_include_required_cache_policy() {
+    let server = Server::start().await;
+    let client = server
+        .client(Lifecycle::Discover(ProtocolVersion::V_2026_07_28))
+        .await;
+    for (method, result) in [
+        ("tools/list", client.list_tools().await),
+        ("resources/list", client.list_resources().await),
+        (
+            "resources/templates/list",
+            client.list_resource_templates().await,
+        ),
+    ] {
+        assert!(result["ttlMs"].as_u64().is_some(), "{method}: {result:#}");
+        assert!(
+            matches!(result["cacheScope"].as_str(), Some("public" | "private")),
+            "{method}: {result:#}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn action_schemas_are_flat_and_requests_remain_strict() {
     let server = Server::start().await;
     let client = server.client(lifecycle()).await;

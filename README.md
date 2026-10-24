@@ -329,7 +329,7 @@ Install the public SQLite server and both native helper tools from
 [`minymaton-server` on crates.io](https://crates.io/crates/minymaton-server):
 
 ```sh
-cargo install --locked --version 0.1.5 minymaton-server
+cargo install --locked --version 0.1.6 minymaton-server
 ```
 
 Cargo builds for the host OS and architecture; the native build prerequisites
@@ -765,7 +765,7 @@ Editable native draw.io source: [`docs/diagrams/minymaton-architecture.drawio`](
 | Path | What's in it |
 |---|---|
 | `crates/minymaton-core` | `Queue` coordinator, `QueueStore` and `QueueReader` traits, in-memory `Signals`, wire types, and bundled SQLite WAL `Store` + `Reader` |
-| `crates/minymaton-server` | rmcp 3.1.4 over axum, the tool surface, `minymaton-server` and `minymaton-storage-check` binaries |
+| `crates/minymaton-server` | rmcp over axum, the tool surface, `minymaton-server` and `minymaton-storage-check` binaries |
 | `crates/minymaton` | The installable `minymaton` server binary (`cargo install minymaton`) |
 | `crates/minymaton-server/src/bin/minymaton-wait.rs` | Standalone native Rust background waiter (`minymaton-wait --handle sub_... --url URL [--ack bat_...] [--max-events N] [--max-bytes N] [--ca-file PATH] [--config PATH] [--token-env VAR]`) |
 | `tools/minymaton-wait.py` | Portable Python 3 stdlib-only background waiter with identical CLI, env, INI, TLS, exit-code, and wire semantics |

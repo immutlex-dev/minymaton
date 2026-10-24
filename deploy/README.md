@@ -54,7 +54,7 @@ instructions in [immutlex-dev/minymaton](https://github.com/immutlex-dev/minymat
 Install the server, waiter and storage checker together:
 
 ```sh
-cargo install --locked --version 0.1.5 minymaton-server
+cargo install --locked --version 0.1.6 minymaton-server
 ```
 
 This compiles for the host OS and architecture; see the root README for native

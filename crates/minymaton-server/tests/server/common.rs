@@ -1,7 +1,7 @@
 //! Harness for the minymaton-server integration tests.
 //!
 //! Every test starts the real `minymaton-server` binary on 127.0.0.1 with its own
-//! SQLite file and talks to it over real sockets: through the rmcp 3.1.4 client,
+//! SQLite file and talks to it over real sockets: through the rmcp client,
 //! as rmcp-based hosts do, and through a raw HTTP client where a test has to see
 //! the exact bytes on the wire.
 
@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use rmcp::model::{
-    CallToolRequest, CallToolRequestParams, ClientCapabilities, ClientInfo, ClientRequest,
+    CallToolRequest, CallToolRequestParams, ClientCapabilities, ClientConfig, ClientRequest,
     Implementation, ProgressNotificationParam, ProgressToken, ProtocolVersion,
     ReadResourceRequestParams, ServerNotification, ServerResult, SubscriptionFilter,
 };
@@ -478,7 +478,7 @@ impl ProgressBook {
 
 struct ProgressRecorder {
     book: Arc<ProgressBook>,
-    info: ClientInfo,
+    info: ClientConfig,
 }
 
 impl ClientHandler for ProgressRecorder {
@@ -490,12 +490,12 @@ impl ClientHandler for ProgressRecorder {
         self.book.record(params);
     }
 
-    fn get_info(&self) -> ClientInfo {
+    fn get_info(&self) -> ClientConfig {
         self.info.clone()
     }
 }
 
-/// A real rmcp 3.1.4 client connected over Streamable HTTP.
+/// A real rmcp client connected over Streamable HTTP.
 pub struct McpClient {
     service: RunningService<RoleClient, ProgressRecorder>,
     book: Arc<ProgressBook>,
@@ -517,7 +517,7 @@ impl McpClient {
         let book = Arc::new(ProgressBook::default());
         let recorder = ProgressRecorder {
             book: Arc::clone(&book),
-            info: ClientInfo::new(
+            info: ClientConfig::new(
                 capabilities,
                 Implementation::new("minymaton-live-arrival-tests", "0"),
             )
@@ -675,6 +675,24 @@ impl McpClient {
             .iter()
             .map(|template| serde_json::to_value(template).expect("serialize a resource template"))
             .collect()
+    }
+
+    pub async fn list_resources(&self) -> Value {
+        let result = self
+            .service
+            .list_resources(None)
+            .await
+            .expect("resources/list");
+        serde_json::to_value(result).expect("serialize resources/list")
+    }
+
+    pub async fn list_resource_templates(&self) -> Value {
+        let result = self
+            .service
+            .list_resource_templates(None)
+            .await
+            .expect("resources/templates/list");
+        serde_json::to_value(result).expect("serialize resources/templates/list")
     }
 
     /// Opens a 2026-07-28 `subscriptions/listen` stream for these resources and
@@ -1136,7 +1154,7 @@ impl RawSession {
             "jsonrpc": "2.0",
             "id": 0,
             "method": "initialize",
-            "params": ClientInfo::new(
+            "params": ClientConfig::new(
                 ClientCapabilities::default(),
                 Implementation::new("minymaton-wire-check", "0"),
             ).with_protocol_version(protocol.clone()),

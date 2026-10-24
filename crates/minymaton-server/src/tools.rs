@@ -18,7 +18,7 @@ use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, Extensions,
     Implementation, ListResourceTemplatesResult, ListToolsResult, PaginatedRequestParams,
     ProgressNotificationParam, ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse,
-    ResourceTemplate, ResourceUpdatedNotificationParam, ServerCapabilities, ServerInfo,
+    ResourceTemplate, ResourceUpdatedNotificationParam, ServerCapabilities, ServerConfig,
     SubscribeRequestParams, SubscriptionFilter, Tool, UnsubscribeRequestParams,
 };
 use rmcp::schemars::JsonSchema;
@@ -350,7 +350,7 @@ impl Minymaton {
 }
 
 impl ServerHandler for Minymaton {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let builder = ServerCapabilities::builder()
             .enable_resources()
             .enable_resources_subscribe()
@@ -362,7 +362,7 @@ impl ServerHandler for Minymaton {
             builder.build()
         };
         let instructions = self.instructions();
-        ServerInfo::new(capabilities)
+        ServerConfig::new(capabilities)
             .with_server_info(Implementation::new("minymaton", env!("CARGO_PKG_VERSION")))
             .with_protocol_version(ProtocolVersion::V_2025_11_25)
             .with_instructions(instructions)
