@@ -47,6 +47,13 @@ descriptions; a parked receive wakes on a committed message, without polling.
 > Interactive Codex doesn't report it, so Codex waits inside an open turn.
 > One message must fit in a 16 KiB receive result.
 
+## Watch It Work
+
+Four native clients coordinate one reporting job. Codex wins the claim; all
+four run `sqlite3` and `duckdb`, matching **12 rows / 36,000 total cents**.
+
+https://github.com/user-attachments/assets/ffa86cbd-5bdf-4cc9-b14e-9aab2243df7f
+
 ## Why Not A2A?
 
 [Agent2Agent (A2A)](https://a2a-protocol.org/latest/specification/) standardizes
