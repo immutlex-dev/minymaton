@@ -221,3 +221,144 @@ async fn a_binding_survives_a_restart_and_serves_legacy_sessions() {
         assert_eq!(acked.ok()["ack_result"]["outcome"], "committed");
     }
 }
+
+const ALICE_TOKEN: &str = "mny_alice_0123456789abcdef0123456789abcdef";
+const TRIAL_A_TOKEN: &str = "mny_trial_a_0123456789abcdef0123456789abcdef";
+const TRIAL_B_TOKEN: &str = "mny_trial_b_0123456789abcdef0123456789abcdef";
+
+fn channel_tokens() -> String {
+    format!(
+        "alice\t{ALICE_TOKEN}\ntrial-a\t{TRIAL_A_TOKEN}\ttrial-a\ntrial-b\t{TRIAL_B_TOKEN}\ttrial-b\n"
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_key_and_description_binding_isolate_bound_channels_and_unbound_callers() {
+    let server = Server::start_with_bearer_tokens_and_options(
+        &channel_tokens(),
+        &["--delivery", "description,tools"],
+    )
+    .await;
+    // All three principals connect to the exact same `/mcp/agent/coder` route.
+    let mut coder_a = server
+        .agent_client_with_token("coder", TRIAL_A_TOKEN, modern())
+        .await;
+    let mut coder_b = server
+        .agent_client_with_token("coder", TRIAL_B_TOKEN, modern())
+        .await;
+    let mut coder_team = server
+        .agent_client_with_token("coder", ALICE_TOKEN, modern())
+        .await;
+
+    let mut changes_a = coder_a.listen_for_tool_changes().await;
+    let mut changes_b = coder_b.listen_for_tool_changes().await;
+    let mut changes_team = coder_team.listen_for_tool_changes().await;
+
+    let f_a = coder_a
+        .call("follow", json!({"stream": "trial-a"}))
+        .await
+        .ok();
+    next_tool_change(&mut changes_a).await;
+    let f_b = coder_b
+        .call("follow", json!({"stream": "trial-b"}))
+        .await
+        .ok();
+    next_tool_change(&mut changes_b).await;
+    let f_team = coder_team
+        .call("follow", json!({"stream": "agents"}))
+        .await
+        .ok();
+    next_tool_change(&mut changes_team).await;
+
+    assert_ne!(f_a["handle"], f_b["handle"]);
+    assert_ne!(f_a["handle"], f_team["handle"]);
+    coder_a.refresh_tools().await;
+    coder_b.refresh_tools().await;
+    coder_team.refresh_tools().await;
+
+    let msg_a = coder_a.publish("trial-a", "ka1", json!("only a")).await;
+    next_tool_change(&mut changes_a).await;
+    let msg_b = coder_b.publish("trial-b", "kb1", json!("only b")).await;
+    next_tool_change(&mut changes_b).await;
+    let msg_team = coder_team
+        .publish("agents", "kt1", json!("only team"))
+        .await;
+    next_tool_change(&mut changes_team).await;
+
+    let list_a = coder_a.list_tools().await;
+    let list_b = coder_b.list_tools().await;
+    let list_team = coder_team.list_tools().await;
+
+    assert_eq!(
+        message_ids(&receive_slot(&list_a, "coder", "trial-a")),
+        vec![msg_a["message_id"].clone()]
+    );
+    assert_eq!(
+        message_ids(&receive_slot(&list_b, "coder", "trial-b")),
+        vec![msg_b["message_id"].clone()]
+    );
+    assert_eq!(
+        message_ids(&receive_slot(&list_team, "coder", "agents")),
+        vec![msg_team["message_id"].clone()]
+    );
+
+    // Acknowledge on trial-a: trial-b and agents retain their pending batches.
+    let acked_a = coder_a.call("ack", json!({})).await.ok();
+    assert_eq!(acked_a["ack_result"]["outcome"], "committed");
+    next_tool_change(&mut changes_a).await;
+    assert_eq!(
+        receive_slot(&coder_a.list_tools().await, "coder", "trial-a"),
+        json!({"status": "empty"})
+    );
+    assert_eq!(
+        message_ids(&receive_slot(&coder_b.list_tools().await, "coder", "trial-b")),
+        vec![msg_b["message_id"].clone()]
+    );
+    assert_eq!(
+        message_ids(&receive_slot(&coder_team.list_tools().await, "coder", "agents")),
+        vec![msg_team["message_id"].clone()]
+    );
+
+    // On a server started with `--description-stream agents --description-subscription desk`,
+    // unbound team callers on `/mcp` see `(agents, desk)`, while channel-bound trial callers
+    // on `/mcp` are scoped to `(trial-a, desk)` and never see `agents`'s batch (`F5`).
+    let desc_server = Server::start_with_bearer_tokens_and_options(
+        &channel_tokens(),
+        &[
+            "--description-stream",
+            "agents",
+            "--description-subscription",
+            "desk",
+            "--delivery",
+            "description,tools",
+        ],
+    )
+    .await;
+    let desc_team = desc_server
+        .client_with_token(ALICE_TOKEN, modern())
+        .await;
+    let desc_trial_a = desc_server
+        .client_with_token(TRIAL_A_TOKEN, modern())
+        .await;
+    let team_pub = desc_team
+        .publish("agents", "d1", json!("for agents desk"))
+        .await;
+    let team_tools = desc_team.list_tools().await;
+    assert_eq!(
+        message_ids(&receive_slot(&team_tools, "desk", "agents")),
+        vec![team_pub["message_id"].clone()]
+    );
+    let trial_tools = desc_trial_a.list_tools().await;
+    assert_eq!(
+        receive_slot(&trial_tools, "desk", "trial-a"),
+        json!({"status": "empty"})
+    );
+    let trial_pub = desc_trial_a
+        .publish("trial-a", "td1", json!("for trial-a desk"))
+        .await;
+    let trial_tools_after = desc_trial_a.list_tools().await;
+    assert_eq!(
+        message_ids(&receive_slot(&trial_tools_after, "desk", "trial-a")),
+        vec![trial_pub["message_id"].clone()]
+    );
+}

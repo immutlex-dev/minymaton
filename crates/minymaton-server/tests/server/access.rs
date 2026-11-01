@@ -249,3 +249,498 @@ async fn every_event_names_the_caller_that_published_it() {
         "an unauthenticated publish names no publisher: {received:#}"
     );
 }
+
+const TRIAL_A_TOKEN: &str = "mny_trial_a_0123456789abcdef0123456789abcdef";
+const TRIAL_B_TOKEN: &str = "mny_trial_b_0123456789abcdef0123456789abcdef";
+const ORG_1_TOKEN: &str = "mny_org_1_0123456789abcdef0123456789abcdef00";
+const ORG_2_TOKEN: &str = "mny_org_2_0123456789abcdef0123456789abcdef00";
+
+fn mixed_tokens() -> String {
+    format!(
+        "alice\t{ALICE_TOKEN}\nbob\t{BOB_TOKEN}\ntrial-a\t{TRIAL_A_TOKEN}\ttrial-a\ntrial-b\t{TRIAL_B_TOKEN}\ttrial-b\norg-1\t{ORG_1_TOKEN}\torg-shared\norg-2\t{ORG_2_TOKEN}\torg-shared\n"
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bound_channel_isolates_trial_callers_across_all_tools_and_resources() {
+    let server = Server::start_with_bearer_tokens(&mixed_tokens()).await;
+
+    // Verify initialize.instructions names the caller's bound channel (or "agents" when unbound).
+    let init_lifecycle = Lifecycle::Initialize(ProtocolVersion::V_2025_11_25);
+    let alice_init = server
+        .client_with_token(ALICE_TOKEN, init_lifecycle.clone())
+        .await;
+    let trial_a_init = server
+        .client_with_token(TRIAL_A_TOKEN, init_lifecycle)
+        .await;
+    let alice_instructions = alice_init.instructions().expect("alice instructions");
+    let trial_a_instructions = trial_a_init.instructions().expect("trial-a instructions");
+    assert!(
+        alice_instructions.contains(
+            "For agent coordination use the existing agents stream unless the user names another"
+        ),
+        "{alice_instructions}"
+    );
+    assert!(
+        trial_a_instructions.contains(
+            "For agent coordination use the existing trial-a stream unless the user names another"
+        ),
+        "{trial_a_instructions}"
+    );
+
+    let alice = server.client_with_token(ALICE_TOKEN, modern()).await;
+    let trial_a = server.client_with_token(TRIAL_A_TOKEN, modern()).await;
+    let trial_b = server.client_with_token(TRIAL_B_TOKEN, modern()).await;
+    let org_1 = server.client_with_token(ORG_1_TOKEN, modern()).await;
+    let org_2 = server.client_with_token(ORG_2_TOKEN, modern()).await;
+
+    // Stream listing is strictly scoped: trial callers see only their bound channel;
+    // unbound team callers never see bound channels in stream(action="list").
+    assert_eq!(listed_streams(&trial_a).await, names(&["trial-a"]));
+    assert_eq!(listed_streams(&trial_b).await, names(&["trial-b"]));
+    assert_eq!(listed_streams(&org_1).await, names(&["org-shared"]));
+    assert_eq!(listed_streams(&org_2).await, names(&["org-shared"]));
+    assert_eq!(listed_streams(&alice).await, names(&["agents"]));
+
+    // Omitting `stream` resolves to `bound_channel` for bound callers and `"agents"` for unbound.
+    let sub_a = trial_a
+        .call("subscription", json!({"action": "create", "label": "desk"}))
+        .await
+        .ok();
+    assert_eq!(sub_a["stream"], "trial-a");
+    let handle_a = sub_a["handle"].as_str().expect("handle_a").to_owned();
+
+    let recovered_a = trial_a
+        .call("subscription", json!({"action": "recover", "label": "desk"}))
+        .await
+        .ok();
+    assert_eq!(recovered_a["handle"], handle_a);
+
+    let listed_subs_a = trial_a
+        .call("subscription", json!({"action": "list"}))
+        .await
+        .ok();
+    assert_eq!(listed_subs_a["stream"], "trial-a");
+    assert_eq!(
+        listed_subs_a["subscriptions"].as_array().expect("subs").len(),
+        1
+    );
+
+    let pub_a = trial_a
+        .call(
+            "publish",
+            json!({"stream": "trial-a", "idempotency_key": "a-1", "payload": {"msg": "private to trial-a"}}),
+        )
+        .await
+        .ok();
+    assert_eq!(pub_a["stream"], "trial-a");
+
+    let alice_sub = alice
+        .call(
+            "subscription",
+            json!({"action": "create", "label": "alice-desk"}),
+        )
+        .await
+        .ok();
+    assert_eq!(alice_sub["stream"], "agents");
+    let alice_handle = alice_sub["handle"].as_str().expect("alice_handle").to_owned();
+    alice
+        .call(
+            "publish",
+            json!({"stream": "agents", "idempotency_key": "team-1", "payload": {"msg": "team only"}}),
+        )
+        .await
+        .ok();
+
+    // Cross-channel and cross-tier calls are refused with stream_forbidden across every tool & resource.
+    for (client, is_bound, blocked_stream, blocked_handle) in [
+        (&trial_a, true, "agents", &alice_handle),
+        (&trial_a, true, "trial-b", &alice_handle),
+        (&trial_b, true, "trial-a", &handle_a),
+        (&alice, false, "trial-a", &handle_a),
+    ] {
+        let create_err = client
+            .call("stream", json!({"action": "create", "name": blocked_stream}))
+            .await
+            .err();
+        assert_eq!(
+            create_err["code"],
+            if is_bound {
+                "stream_forbidden"
+            } else {
+                "stream_exists"
+            },
+            "{create_err:#}"
+        );
+        forbidden(
+            client,
+            "stream",
+            json!({"action": "grant", "name": blocked_stream, "caller": "bob"}),
+        )
+        .await;
+        forbidden(
+            client,
+            "stream",
+            json!({"action": "revoke", "name": blocked_stream, "caller": "alice"}),
+        )
+        .await;
+        forbidden(
+            client,
+            "subscription",
+            json!({"action": "create", "stream": blocked_stream, "label": "intruder"}),
+        )
+        .await;
+        forbidden(
+            client,
+            "subscription",
+            json!({"action": "list", "stream": blocked_stream}),
+        )
+        .await;
+        forbidden(
+            client,
+            "subscription",
+            json!({"action": "recover", "stream": blocked_stream, "label": "desk"}),
+        )
+        .await;
+        forbidden(
+            client,
+            "subscription",
+            json!({"action": "delete", "stream": blocked_stream, "label": "desk"}),
+        )
+        .await;
+        forbidden(
+            client,
+            "publish",
+            json!({"stream": blocked_stream, "idempotency_key": "x", "payload": "nope"}),
+        )
+        .await;
+        forbidden(client, "receive", receive(blocked_handle)).await;
+
+        let read_err = format!(
+            "{:?}",
+            client
+                .read_inbox(&inbox_uri(blocked_handle))
+                .await
+                .expect_err("read_inbox must be refused")
+        );
+        assert!(read_err.contains("stream_forbidden"), "{read_err}");
+
+        let mut sub = client.listen(&[&inbox_uri(blocked_handle)]).await;
+        let next = sub.next().await;
+        let listen_err = format!("{next:?} {:?}", sub.end());
+        assert!(listen_err.contains("stream_forbidden"), "{listen_err}");
+    }
+
+    // Bound callers also cannot create new arbitrary streams or grant/revoke on their own channel.
+    forbidden(
+        &trial_a,
+        "stream",
+        json!({"action": "create", "name": "another-stream"}),
+    )
+    .await;
+    forbidden(
+        &trial_a,
+        "stream",
+        json!({"action": "grant", "name": "trial-a", "caller": "alice"}),
+    )
+    .await;
+
+    // Two tokens bound to the same channel (`org-shared`) share that channel and keep distinct publishers.
+    let org_handle = org_1.create_subscription("org-shared", "org-desk").await;
+    org_2
+        .call(
+            "publish",
+            json!({"stream": "org-shared", "idempotency_key": "org-k1", "payload": "from org-2"}),
+        )
+        .await
+        .ok();
+    let org_batch = org_1.call("receive", receive(&org_handle)).await.ok();
+    assert_eq!(payloads(&org_batch), vec![json!("from org-2")]);
+    assert_eq!(org_batch["events"][0]["publisher"], "org-2");
+
+    // Omitting `stream` on delete works for bound callers.
+    let deleted_a = trial_a
+        .call("subscription", json!({"action": "delete", "label": "desk"}))
+        .await
+        .ok();
+    assert_eq!(
+        deleted_a,
+        json!({"status": "deleted", "stream": "trial-a", "label": "desk"})
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn provisioning_refuses_to_collide_with_an_existing_open_or_member_stream() {
+    let mut server = Server::start_with_bearer_tokens(&tokens()).await;
+    let alice = server.client_with_token(ALICE_TOKEN, modern()).await;
+    alice.create_stream("open-clash").await;
+    alice
+        .call(
+            "stream",
+            json!({"action": "create", "name": "private-clash", "members": ["bob"]}),
+        )
+        .await
+        .ok();
+
+    let locked = server.run_admin(&[
+        "--activate-enrollment",
+        server.token_file().to_str().expect("utf8 token file"),
+    ]);
+    assert!(
+        !locked.status.success(),
+        "SQLite --activate-enrollment must refuse to run while minymaton-server holds the DB lock"
+    );
+    let locked_err = String::from_utf8_lossy(&locked.stderr);
+    assert!(
+        locked_err.contains("is locked by a running server"),
+        "{locked_err}"
+    );
+    server.stop();
+
+    let current = server.run_admin(&[
+        "--activate-enrollment",
+        server.token_file().to_str().expect("utf8 token file"),
+    ]);
+    assert!(
+        current.status.success(),
+        "{}",
+        String::from_utf8_lossy(&current.stderr)
+    );
+    let current_digest = String::from_utf8_lossy(&current.stdout).trim().to_owned();
+
+    for clash in ["open-clash", "private-clash"] {
+        let bad_tokens = server.token_file().with_file_name(format!("{clash}.conf"));
+        std::fs::write(
+            &bad_tokens,
+            format!("alice\t{ALICE_TOKEN}\ntrial\t{TRIAL_A_TOKEN}\t{clash}\n"),
+        )
+        .expect("write bad tokens");
+        let output = server.run_admin(&[
+            "--activate-enrollment",
+            bad_tokens.to_str().expect("utf8 path"),
+            "--expected-enrollment-digest",
+            &current_digest,
+        ]);
+        assert!(
+            !output.status.success(),
+            "provisioning {clash} must fail closed"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(clash), "{stderr}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn per_channel_budgets_and_retire_channel_reclaim_bound_channel_resources() {
+    let mut server = Server::start_with_bearer_tokens_and_options(
+        &mixed_tokens(),
+        &[
+            "--max-retained-events-per-channel",
+            "2",
+            "--max-subscriptions-per-channel",
+            "2",
+        ],
+    )
+    .await;
+    let trial_a = server.client_with_token(TRIAL_A_TOKEN, modern()).await;
+    let trial_b = server.client_with_token(TRIAL_B_TOKEN, modern()).await;
+    let alice = server.client_with_token(ALICE_TOKEN, modern()).await;
+
+    let sub_1 = trial_a.create_subscription("trial-a", "s1").await;
+    let _sub_2 = trial_a.create_subscription("trial-a", "s2").await;
+    let third_sub = trial_a
+        .call(
+            "subscription",
+            json!({"action": "create", "stream": "trial-a", "label": "s3"}),
+        )
+        .await
+        .err();
+    assert_eq!(third_sub["code"], "storage_full", "{third_sub:#}");
+
+    // Another channel and unbound streams are unaffected by trial-a's subscription cap.
+    let _sub_b = trial_b.create_subscription("trial-b", "s1").await;
+    let _sub_team = alice.create_subscription("agents", "s1").await;
+
+    trial_a.publish("trial-a", "e1", json!("one")).await;
+    trial_a.publish("trial-a", "e2", json!("two")).await;
+    let third_pub = trial_a
+        .call(
+            "publish",
+            json!({"stream": "trial-a", "idempotency_key": "e3", "payload": "three"}),
+        )
+        .await
+        .err();
+    assert_eq!(third_pub["code"], "storage_full", "{third_pub:#}");
+
+    // Other channels and team streams can still publish when trial-a is full.
+    trial_b.publish("trial-b", "b1", json!("still open")).await;
+    alice.publish("agents", "a1", json!("still open")).await;
+
+    // On SQLite, standalone `--retire-channel` refuses to run while the server holds the DB lock.
+    let locked = server.run_admin(&["--retire-channel", "trial-a"]);
+    assert!(
+        !locked.status.success(),
+        "SQLite --retire-channel must refuse to run while minymaton-server holds the DB lock"
+    );
+    let locked_err = String::from_utf8_lossy(&locked.stderr);
+    assert!(
+        locked_err.contains("is locked by a running server"),
+        "{locked_err}"
+    );
+    server.stop();
+
+    // `--retire-channel` refuses open streams ("agents") and non-channel private streams.
+    let refuse_agents = server.run_admin(&["--retire-channel", "agents"]);
+    assert!(!refuse_agents.status.success());
+
+    // `--retire-channel trial-a` deletes the stream and all its subscriptions/events/batches.
+    let retired = server.run_admin(&["--retire-channel", "trial-a"]);
+    assert!(
+        retired.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retired.stderr)
+    );
+
+    // Re-activating enrollment re-provisions `trial-a` with a clean slate.
+    let reenrolled = server.run_admin(&[
+        "--activate-enrollment",
+        server.token_file().to_str().expect("utf8 token file"),
+    ]);
+    assert!(
+        reenrolled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reenrolled.stderr)
+    );
+
+    server.restart().await;
+
+    let trial_a = server.client_with_token(TRIAL_A_TOKEN, modern()).await;
+    let gone = trial_a.call("receive", receive(&sub_1)).await.err();
+    assert_eq!(gone["code"], "subscription_not_found", "{gone:#}");
+
+    let fresh_sub = trial_a.create_subscription("trial-a", "s1").await;
+    assert_ne!(
+        fresh_sub, sub_1,
+        "re-created subscription after retirement must not reuse retired subscription ID/handle"
+    );
+    trial_a.publish("trial-a", "e3", json!("three")).await;
+    let received = trial_a.call("receive", receive(&fresh_sub)).await.ok();
+    assert_eq!(payloads(&received), vec![json!("three")]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_tool_list_watcher_notifies_on_visibility_revoke_regrant_and_delete() {
+    use crate::common::next_tool_change;
+
+    let server = Server::start_with_bearer_tokens_and_options(
+        &tokens(),
+        &["--delivery", "description,tools"],
+    )
+    .await;
+    let alice = server.client_with_token(ALICE_TOKEN, modern()).await;
+    let bob = server.client_with_token(BOB_TOKEN, modern()).await;
+
+    alice
+        .call(
+            "stream",
+            json!({"action": "create", "name": "secrets", "members": ["bob"]}),
+        )
+        .await
+        .ok();
+
+    let mut bob_agent = server
+        .agent_client_with_token("bob-agent", BOB_TOKEN, modern())
+        .await;
+    let mut changes = bob_agent.listen_for_tool_changes().await;
+    let follow = bob_agent
+        .call("follow", json!({"stream": "secrets"}))
+        .await
+        .ok();
+    assert_eq!(follow["stream"], "secrets");
+    next_tool_change(&mut changes).await;
+    bob_agent.refresh_tools().await;
+
+    // Publish an event to bob-agent on `secrets`; ToolListWatcher emits `notifications/tools/list_changed`.
+    alice
+        .publish("secrets", "sec-1", json!({"msg": "eyes-only"}))
+        .await;
+    next_tool_change(&mut changes).await;
+    bob_agent.refresh_tools().await;
+    let tools_while_member = bob_agent.list_tools().await;
+    let receive_desc = tools_while_member["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .find(|t| t["name"] == "receive")
+        .and_then(|t| t["description"].as_str())
+        .expect("receive description");
+    assert!(receive_desc.contains("eyes-only"), "{receive_desc}");
+
+    // Revoking bob from `secrets` notifies `bob-agent` and hides the pending private batch.
+    alice
+        .call(
+            "stream",
+            json!({"action": "revoke", "name": "secrets", "caller": "bob"}),
+        )
+        .await
+        .ok();
+    next_tool_change(&mut changes).await;
+    bob_agent.refresh_tools().await;
+    let tools_after_revoke = bob_agent.list_tools().await;
+    let receive_desc_revoked = tools_after_revoke["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .find(|t| t["name"] == "receive")
+        .and_then(|t| t["description"].as_str())
+        .expect("receive description");
+    assert!(
+        !receive_desc_revoked.contains("eyes-only"),
+        "revoked caller's tool description must not leak private stream batch: {receive_desc_revoked}"
+    );
+
+    // Re-granting bob on `secrets` notifies `bob-agent` and restores the bound private batch.
+    alice
+        .call(
+            "stream",
+            json!({"action": "grant", "name": "secrets", "caller": "bob"}),
+        )
+        .await
+        .ok();
+    next_tool_change(&mut changes).await;
+    bob_agent.refresh_tools().await;
+    let tools_after_regrant = bob_agent.list_tools().await;
+    let receive_desc_regranted = tools_after_regrant["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .find(|t| t["name"] == "receive")
+        .and_then(|t| t["description"].as_str())
+        .expect("receive description");
+    assert!(
+        receive_desc_regranted.contains("eyes-only"),
+        "re-granted caller must see bound stream batch again: {receive_desc_regranted}"
+    );
+
+    // Deleting bob-agent's subscription emits `notifications/tools/list_changed` (deletion sentinel == i64::MAX)
+    // and keeps the watcher alive so re-following works.
+    bob.call(
+        "subscription",
+        json!({"action": "delete", "stream": "secrets", "label": "bob-agent"}),
+    )
+    .await
+    .ok();
+    next_tool_change(&mut changes).await;
+    bob_agent.refresh_tools().await;
+
+    bob_agent
+        .call("follow", json!({"stream": "secrets"}))
+        .await
+        .ok();
+    next_tool_change(&mut changes).await;
+    bob_agent.refresh_tools().await;
+    alice
+        .publish("secrets", "sec-2", json!({"msg": "after-refollow"}))
+        .await;
+    next_tool_change(&mut changes).await;
+}

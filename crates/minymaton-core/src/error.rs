@@ -28,6 +28,8 @@ pub enum ErrorCode {
     StorageFull,
     StorageBusy,
     StorageUnavailable,
+    /// A newer enrollment or authority epoch superseded this gateway's writes or reads.
+    AuthorityFenced,
     Internal,
 }
 

@@ -22,11 +22,11 @@ use crate::api::{
 };
 use crate::error::{ErrorCode, ToolError};
 use crate::ids::inbox_handle;
-use crate::policy::Membership;
+use crate::policy::{self, Access, Limits, Membership};
 use crate::signals::Signals;
 use crate::store::{
-    Admission, Bounds, Publication, QueueReader, QueueStore, Reader, Selection, Store,
-    inbox_not_found,
+    Admission, Bounds, DeletedStream, Publication, QueueReader, QueueStore, Reader, Selection,
+    Store, inbox_not_found,
 };
 use crate::wire::{RESULT_LIMIT, widest_single_event_bytes};
 
@@ -38,11 +38,14 @@ const METADATA_LIMIT: usize = 1024;
 
 type SharedStore = Arc<Mutex<Box<dyn QueueStore>>>;
 type SharedReader = Arc<Mutex<Box<dyn QueueReader>>>;
+type SharedRefresher = Arc<Mutex<Option<AccessRefresher>>>;
 
+#[derive(Clone)]
 pub struct Queue {
     store: SharedStore,
     reader: SharedReader,
     signals: Arc<Signals>,
+    access_refresh: SharedRefresher,
 }
 
 /// The call a receive answers.
@@ -59,7 +62,7 @@ pub enum Admitted {
     Done(Value),
     /// Nothing to deliver yet. The receive is subscribed to commits; call
     /// [`Waiter::wait`] to wait for events or a newer receive.
-    Waiting(Waiter),
+    Waiting(Box<Waiter>),
 }
 
 /// A subscription's inbox resource (decision 17).
@@ -68,6 +71,16 @@ pub struct Inbox {
     pub uri: String,
     subscription_id: i64,
     stream_id: i64,
+    access: Access,
+}
+
+impl Inbox {
+    /// Clears the enrollment digest on this inbox snapshot when token and
+    /// enrollment revocation are already enforced by the session/request layer.
+    pub fn without_enrollment_digest(mut self) -> Self {
+        self.access.enrollment_digest = None;
+        self
+    }
 }
 
 impl Queue {
@@ -80,7 +93,11 @@ impl Queue {
     /// The SQLite backend: one writer and one read-only WAL connection on
     /// the database at `path`.
     pub fn open(path: &Path) -> Result<Self, String> {
-        let store = Store::open(path)?;
+        Self::open_with_limits(path, Limits::default())
+    }
+
+    pub fn open_with_limits(path: &Path, limits: Limits) -> Result<Self, String> {
+        let store = Store::open_with_limits(path, limits)?;
         let reader = Reader::open(path)?;
         Ok(Self::with_backend(Box::new(store), Box::new(reader)))
     }
@@ -88,26 +105,191 @@ impl Queue {
     /// A queue over any backend. `reader` must observe every command `store`
     /// has committed by the time that command returns.
     pub fn with_backend(store: Box<dyn QueueStore>, reader: Box<dyn QueueReader>) -> Self {
+        Self::with_signals(store, reader, Arc::new(Signals::default()))
+    }
+
+    fn with_signals(
+        store: Box<dyn QueueStore>,
+        reader: Box<dyn QueueReader>,
+        signals: Arc<Signals>,
+    ) -> Self {
         Self {
             store: Arc::new(Mutex::new(store)),
             reader: Arc::new(Mutex::new(reader)),
-            signals: Arc::new(Signals::default()),
+            signals,
+            access_refresh: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// Runs a `stream` call for `caller`, the authenticated bearer-token
-    /// caller, or `None` on a server without bearer authentication.
-    pub async fn stream(&self, arguments: Value, caller: Option<&str>) -> Result<Value, ToolError> {
+    pub fn set_access_refresh(&self, refresher: AccessRefresher) {
+        *self
+            .access_refresh
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(refresher);
+    }
+
+    pub fn signal_tick(&self) -> u64 {
+        self.signals.tick()
+    }
+
+    pub fn binding_changed_since(
+        &self,
+        stream_id: i64,
+        subscription_id: i64,
+        since_tick: u64,
+    ) -> bool {
+        self.signals
+            .binding_changed_since(stream_id, subscription_id, since_tick)
+    }
+
+    pub fn commits_signal(&self, stream_id: i64) -> watch::Receiver<u64> {
+        self.signals.commits(stream_id)
+    }
+
+    pub fn owners_signal(&self, subscription_id: i64) -> watch::Receiver<i64> {
+        self.signals.owners(subscription_id)
+    }
+
+    pub fn acked_signal(&self, subscription_id: i64) -> watch::Receiver<u64> {
+        self.signals.acked(subscription_id)
+    }
+
+    pub fn access_signal(&self, stream_id: i64) -> watch::Receiver<u64> {
+        self.signals.access_changed(stream_id)
+    }
+
+    pub fn agent_bound_signal(&self, agent_key: &str) -> watch::Receiver<i64> {
+        self.signals.agent_bound(agent_key)
+    }
+
+    pub fn enrollment_signal(&self) -> watch::Receiver<u64> {
+        self.signals.enrollment_changed()
+    }
+
+    pub fn active_enrollment(&self) -> Option<[u8; 32]> {
+        self.signals.active_enrollment()
+    }
+
+    pub fn provision_channel_blocking(&self, channel: &str) -> Result<(), ToolError> {
+        check_name("channel", channel)?;
+        self.store
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .provision_channel(channel)
+    }
+
+    pub fn store_enrollment_blocking(
+        &self,
+        channels: &[String],
+        digest: [u8; 32],
+        expected: Option<[u8; 32]>,
+    ) -> Result<bool, ToolError> {
+        for channel in channels {
+            check_name("channel", channel)?;
+        }
+        self.store
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .activate_enrollment(channels, digest, expected)
+    }
+
+    /// Commits a SQLite enrollment transition and runs `on_committed` while
+    /// holding BOTH the writer store lock and the reader lock so neither
+    /// `with_store_access` nor `with_reader_access` can observe a mismatch
+    /// between the stored enrollment digest and the in-memory authenticator
+    /// (`Opus RR3-01`, `Opus RR4-01`, `Sol RR-12`).
+    pub fn store_enrollment_with_hook_blocking<F>(
+        &self,
+        channels: &[String],
+        digest: [u8; 32],
+        expected_fn: impl FnOnce(Option<[u8; 32]>) -> Option<[u8; 32]>,
+        on_committed: F,
+    ) -> Result<bool, ToolError>
+    where
+        F: FnOnce(),
+    {
+        for channel in channels {
+            check_name("channel", channel)?;
+        }
+        let mut store = self.store.lock().unwrap_or_else(PoisonError::into_inner);
+        let reader = self.reader.lock().unwrap_or_else(PoisonError::into_inner);
+        let stored = reader.enrollment_digest()?;
+        let expected = expected_fn(stored);
+        let changed = store.activate_enrollment(channels, digest, expected)?;
+        on_committed();
+        drop(reader);
+        drop(store);
+        Ok(changed)
+    }
+
+    pub fn notify_enrollment(&self, digest: [u8; 32]) {
+        self.signals.set_enrollment(digest);
+    }
+
+    pub fn activate_enrollment_blocking(
+        &self,
+        channels: &[String],
+        digest: [u8; 32],
+        expected: Option<[u8; 32]>,
+    ) -> Result<bool, ToolError> {
+        let changed = self.store_enrollment_blocking(channels, digest, expected)?;
+        self.notify_enrollment(digest);
+        Ok(changed)
+    }
+
+    pub fn enrollment_digest_blocking(&self) -> Result<Option<[u8; 32]>, ToolError> {
+        let digest = self
+            .reader
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .enrollment_digest()?;
+        if let Some(digest) = digest {
+            self.signals.set_enrollment(digest);
+        }
+        Ok(digest)
+    }
+
+    pub fn delete_stream_blocking(&self, name: &str) -> Result<DeletedStream, ToolError> {
+        check_name("stream", name)?;
+        let deleted = self
+            .store
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .delete_stream(name)?;
+        self.notify_deleted_stream(&deleted);
+        Ok(deleted)
+    }
+
+    pub async fn delete_stream(&self, name: &str) -> Result<DeletedStream, ToolError> {
+        check_name("stream", name)?;
+        let name = name.to_owned();
+        let deleted = with_store(&self.store, move |store| store.delete_stream(&name)).await?;
+        self.notify_deleted_stream(&deleted);
+        Ok(deleted)
+    }
+
+    fn notify_deleted_stream(&self, deleted: &DeletedStream) {
+        for &sub_id in &deleted.subscription_ids {
+            self.signals.subscription_deleted(sub_id);
+        }
+        for agent_key in &deleted.agent_keys {
+            self.signals.set_agent_bound(agent_key, 0);
+        }
+        self.signals.stream_access_changed(deleted.stream_id);
+    }
+
+    /// Runs a `stream` call for `access`.
+    pub async fn stream(&self, arguments: Value, access: &Access) -> Result<Value, ToolError> {
         let arguments = parse(arguments)?;
-        let caller = caller.map(str::to_owned);
+        let access = access.clone();
         let result = match arguments {
             StreamArgs::Create { name, members } => {
                 check_name("name", &name)?;
                 for member in members.iter().flatten() {
                     check_name("members", member)?;
                 }
-                with_store(&self.store, move |store| {
-                    store.create_stream(&name, caller.as_deref(), members.as_deref())
+                with_store_access(&self.store, &self.access_refresh, &access, move |store, access| {
+                    store.create_stream(&name, access, members.as_deref())
                 })
                 .await?
             }
@@ -115,20 +297,20 @@ impl Queue {
                 name,
                 caller: member,
             } => {
-                self.change_member(name, caller, member, Membership::Grant)
+                self.change_member(name, access, member, Membership::Grant)
                     .await?
             }
             StreamArgs::Revoke {
                 name,
                 caller: member,
             } => {
-                self.change_member(name, caller, member, Membership::Revoke)
+                self.change_member(name, access, member, Membership::Revoke)
                     .await?
             }
             StreamArgs::List { after, limit } => {
                 let limit = page_limit(after.as_deref(), limit)?;
-                with_reader(&self.reader, move |reader| {
-                    reader.list_streams(caller.as_deref(), after.as_deref(), limit)
+                with_reader_access(&self.reader, &self.access_refresh, &access, move |reader, access| {
+                    reader.list_streams(access, after.as_deref(), limit)
                 })
                 .await?
             }
@@ -139,24 +321,29 @@ impl Queue {
     async fn change_member(
         &self,
         name: String,
-        caller: Option<String>,
+        access: Access,
         member: String,
         change: Membership,
     ) -> Result<crate::api::StreamResult, ToolError> {
         check_name("name", &name)?;
         check_name("caller", &member)?;
-        with_store(&self.store, move |store| {
-            store.change_member(&name, caller.as_deref(), &member, change)
-        })
-        .await
+        let (result, changed_stream) =
+            with_store_access(&self.store, &self.access_refresh, &access, move |store, access| {
+                store.change_member(&name, access, &member, change)
+            })
+            .await?;
+        if let Some(stream_id) = changed_stream {
+            self.signals.stream_access_changed(stream_id);
+        }
+        Ok(result)
     }
 
     pub async fn subscription(
         &self,
         arguments: Value,
-        caller: Option<&str>,
+        access: &Access,
     ) -> Result<Value, ToolError> {
-        let caller = caller.map(str::to_owned);
+        let access = access.clone();
         let result = match parse(arguments)? {
             SubscriptionArgs::Create {
                 stream,
@@ -164,6 +351,10 @@ impl Queue {
                 start_at,
                 metadata,
             } => {
+                if let Some(s) = &stream {
+                    check_name("stream", s)?;
+                }
+                let stream = policy::resolve_stream(stream.as_deref(), &access)?.to_owned();
                 check_name("stream", &stream)?;
                 if let Some(label) = &label {
                     check_name("label", label)?;
@@ -171,40 +362,66 @@ impl Queue {
                 if let Some(metadata) = &metadata {
                     check_metadata(metadata)?;
                 }
-                with_store(&self.store, move |store| {
-                    store.claim_subscription(
-                        &stream,
-                        caller.as_deref(),
-                        label.as_deref(),
-                        start_at,
-                        metadata,
-                    )
-                })
-                .await?
+                let (created, _, _) = with_store_access(
+                    &self.store,
+                    &self.access_refresh,
+                    &access,
+                    move |store, access| {
+                        store.claim_subscription(
+                            &stream,
+                            access,
+                            label.as_deref(),
+                            start_at,
+                            metadata.clone(),
+                        )
+                    },
+                )
+                .await?;
+                created
             }
             SubscriptionArgs::Recover {
                 stream,
                 label,
                 metadata,
             } => {
+                if let Some(s) = &stream {
+                    check_name("stream", s)?;
+                }
+                let stream = policy::resolve_stream(stream.as_deref(), &access)?.to_owned();
                 check_name("stream", &stream)?;
                 check_name("label", &label)?;
                 if let Some(metadata) = &metadata {
                     check_metadata(metadata)?;
                 }
-                with_store(&self.store, move |store| {
-                    store.recover_subscription(&stream, caller.as_deref(), &label, metadata)
-                })
-                .await?
+                let (recovered, _, _) = with_store_access(
+                    &self.store,
+                    &self.access_refresh,
+                    &access,
+                    move |store, access| {
+                        store.recover_subscription(&stream, access, &label, metadata.clone())
+                    },
+                )
+                .await?;
+                recovered
             }
             SubscriptionArgs::Delete { stream, label } => {
+                if let Some(s) = &stream {
+                    check_name("stream", s)?;
+                }
+                let stream = policy::resolve_stream(stream.as_deref(), &access)?.to_owned();
                 check_name("stream", &stream)?;
                 check_name("label", &label)?;
-                let (deleted, subscription_id) = with_store(&self.store, move |store| {
-                    store.delete_subscription(&stream, caller.as_deref(), &label)
-                })
+                let (deleted, subscription_id, bound_agent) = with_store_access(
+                    &self.store,
+                    &self.access_refresh,
+                    &access,
+                    move |store, access| store.delete_subscription(&stream, access, &label),
+                )
                 .await?;
                 self.signals.subscription_deleted(subscription_id);
+                if let Some(agent_key) = bound_agent {
+                    self.signals.set_agent_bound(&agent_key, 0);
+                }
                 deleted
             }
             SubscriptionArgs::List {
@@ -212,18 +429,27 @@ impl Queue {
                 after,
                 limit,
             } => {
+                if let Some(s) = &stream {
+                    check_name("stream", s)?;
+                }
+                let stream = policy::resolve_stream(stream.as_deref(), &access)?.to_owned();
                 check_name("stream", &stream)?;
                 let limit = page_limit(after.as_deref(), limit)?;
                 let waiting = self.signals.waiting_set();
-                with_reader(&self.reader, move |reader| {
-                    reader.list_subscriptions(
-                        &stream,
-                        caller.as_deref(),
-                        after.as_deref(),
-                        limit,
-                        &waiting,
-                    )
-                })
+                with_reader_access(
+                    &self.reader,
+                    &self.access_refresh,
+                    &access,
+                    move |reader, access| {
+                        reader.list_subscriptions(
+                            &stream,
+                            access,
+                            after.as_deref(),
+                            limit,
+                            &waiting,
+                        )
+                    },
+                )
                 .await?
             }
         };
@@ -233,9 +459,9 @@ impl Queue {
     pub async fn publish(
         &self,
         arguments: Value,
-        caller: Option<&str>,
+        access: &Access,
     ) -> Result<Value, ToolError> {
-        self.publish_committed(arguments, caller)
+        self.publish_committed(arguments, access)
             .await
             .map(|(value, _, _)| value)
     }
@@ -245,7 +471,7 @@ impl Queue {
     pub async fn publish_committed(
         &self,
         arguments: Value,
-        caller: Option<&str>,
+        access: &Access,
     ) -> Result<(Value, bool, Option<String>), ToolError> {
         let PublishArgs {
             stream,
@@ -257,6 +483,7 @@ impl Queue {
             claims,
         } = parse(arguments)?;
         check_name("stream", &stream)?;
+        let stream = policy::resolve_stream(Some(&stream), access)?.to_owned();
         check_name("idempotency_key", &idempotency_key)?;
         if let Some(from) = &from {
             check_name("from", from)?;
@@ -274,6 +501,7 @@ impl Queue {
         let recipient_label = to
             .filter(|label| !is_broadcast_recipient(label))
             .or_else(|| inferred_recipient(&payload));
+        let caller = access.caller.as_deref();
         // Until claim checks exist, every message must fit in a result by itself.
         let needed = widest_single_event_bytes(&payload, caller);
         if needed > RESULT_LIMIT {
@@ -306,21 +534,24 @@ impl Queue {
         }
         let digest = Sha256::digest(digest_input.as_bytes()).to_vec();
         let text = payload.to_string();
-        let publisher = caller.map(str::to_owned);
-        let published = with_store(&self.store, move |store| {
-            store.publish(Publication {
-                stream: &stream,
-                key: &idempotency_key,
-                payload: &text,
-                sender_label: sender_label.as_deref(),
-                recipient_label: recipient_label.as_deref(),
-                ack: ack.as_deref(),
-                publisher: publisher.as_deref(),
-                claims: claims.as_deref(),
-                digest: &digest,
+        let published =
+            with_store_access(&self.store, &self.access_refresh, access, move |store, access| {
+                store.publish(Publication {
+                    stream: &stream,
+                    key: &idempotency_key,
+                    payload: &text,
+                    sender_label: sender_label.as_deref(),
+                    recipient_label: recipient_label.as_deref(),
+                    ack: ack.as_deref(),
+                    access,
+                    claims: claims.as_deref(),
+                    digest: &digest,
+                })
             })
-        })
-        .await?;
+            .await?;
+        if let Some((sub_id, seq)) = published.acked_subscription {
+            self.signals.subscription_acked(sub_id, seq);
+        }
         if let Some((stream_id, sequence)) = published.commit {
             self.signals.committed(stream_id, sequence);
         }
@@ -335,65 +566,163 @@ impl Queue {
         &self,
         stream: &str,
         label: &str,
-    ) -> Result<String, ToolError> {
+        access: &Access,
+    ) -> Result<(i64, i64, String), ToolError> {
         check_name("stream", stream)?;
         check_name("label", label)?;
-        let stream = stream.to_owned();
+        let stream = policy::resolve_stream(Some(stream), access)?.to_owned();
         let label = label.to_owned();
-        with_store(&self.store, move |store| {
-            store.ensure_subscription(&stream, &label)
+        with_store_access(&self.store, &self.access_refresh, access, move |store, access| {
+            store.ensure_subscription(&stream, &label, access)
         })
         .await
     }
 
     /// Binds the agent to its own subscription on the stream: the label is the
-    /// agent's name. The stream and the subscription are created if missing;
-    /// an unbound subscription already claimed by another client is not taken.
+    /// agent's name. The stream (when unbound) and the subscription are created
+    /// if missing; an unbound subscription already claimed by another client is
+    /// not taken.
     pub async fn follow(
         &self,
         agent: &str,
-        caller: Option<&str>,
+        access: &Access,
         arguments: Value,
     ) -> Result<Value, ToolError> {
         let FollowArgs { stream } = parse(arguments)?;
         check_name("agent", agent)?;
         check_name("stream", &stream)?;
+        let stream = policy::resolve_stream(Some(&stream), access)?.to_owned();
+        let agent_key = policy::agent_key(access, agent);
+        let signal_key = agent_key.clone();
         let agent = agent.to_owned();
-        let caller = caller.map(str::to_owned);
-        let result = with_store(&self.store, move |store| {
-            let handle = store.follow_stream(&agent, caller.as_deref(), &stream)?;
-            Ok(FollowResult::Following {
-                label: agent.clone(),
-                agent,
-                stream,
-                handle,
+        let (result, subscription_id) =
+            with_store_access(&self.store, &self.access_refresh, access, move |store, access| {
+                let (_, subscription_id, handle) =
+                    store.follow_stream(&agent_key, &agent, access, &stream)?;
+                Ok((
+                    FollowResult::Following {
+                        label: agent.clone(),
+                        agent: agent.clone(),
+                        stream: stream.clone(),
+                        handle,
+                    },
+                    subscription_id,
+                ))
             })
-        })
-        .await?;
+            .await?;
+        self.signals.set_agent_bound(&signal_key, subscription_id);
         Ok(crate::json(&result))
     }
 
-    /// The stream, label and handle the agent follows, if it follows one.
+    /// The `(stream_id, subscription_id, stream, label, handle)` the agent
+    /// follows under `access`, if it follows one and `access` is still admitted
+    /// to that stream.
     pub async fn agent_binding(
         &self,
         agent: &str,
-    ) -> Result<Option<(String, String, String)>, ToolError> {
-        let agent = agent.to_owned();
-        with_reader(&self.reader, move |reader| reader.agent_binding(&agent)).await
+        access: &Access,
+    ) -> Result<Option<(i64, i64, String, String, String)>, ToolError> {
+        let agent_key = policy::agent_key(access, agent);
+        with_reader_access(&self.reader, &self.access_refresh, access, move |reader, access| {
+            let Some(binding) = reader.agent_binding(&agent_key)? else {
+                return Ok(None);
+            };
+            match reader.check_access(binding.0, access) {
+                Ok(()) => Ok(Some(binding)),
+                Err(error) if error.code == ErrorCode::StreamForbidden => Ok(None),
+                Err(error) => Err(error),
+            }
+        })
+        .await
+    }
+
+    /// The raw `(stream_id, subscription_id, stream, label, handle)` the agent
+    /// is recorded as following under `access`, before checking stream access.
+    pub async fn agent_binding_raw(
+        &self,
+        agent: &str,
+        access: &Access,
+    ) -> Result<Option<(i64, i64, String, String, String)>, ToolError> {
+        let agent_key = policy::agent_key(access, agent);
+        with_reader_access(&self.reader, &self.access_refresh, access, move |reader, _access| {
+            reader.agent_binding(&agent_key)
+        })
+        .await
+    }
+
+    /// The `stream_id` the agent is recorded as following under `access`, even
+    /// if `access` is currently revoked from that stream.
+    pub async fn agent_binding_stream_id(
+        &self,
+        agent: &str,
+        access: &Access,
+    ) -> Result<Option<i64>, ToolError> {
+        let agent_key = policy::agent_key(access, agent);
+        with_reader_access(&self.reader, &self.access_refresh, access, move |reader, _access| {
+            Ok(reader.agent_binding(&agent_key)?.map(|b| b.0))
+        })
+        .await
+    }
+
+    /// Whether `access` is admitted to `stream_id`.
+    pub async fn check_stream_access(
+        &self,
+        stream_id: i64,
+        access: &Access,
+    ) -> Result<bool, ToolError> {
+        with_reader_access(&self.reader, &self.access_refresh, access, move |reader, access| {
+            match reader.check_access(stream_id, access) {
+                Ok(()) => Ok(true),
+                Err(error) if error.code == ErrorCode::StreamForbidden => Ok(false),
+                Err(error) => Err(error),
+            }
+        })
+        .await
+    }
+
+    /// Checks that `access` is admitted to `stream_id` and returns whether
+    /// `subscription_id` has a pending batch or visible unread events.
+    pub async fn subscription_unread(
+        &self,
+        subscription_id: i64,
+        stream_id: i64,
+        access: &Access,
+    ) -> Result<bool, ToolError> {
+        with_reader_access(&self.reader, &self.access_refresh, access, move |reader, access| {
+            reader.check_access(stream_id, access)?;
+            reader.inbox_unread(subscription_id)
+        })
+        .await
+    }
+
+    /// Checks that `access` is admitted to `stream_id` and returns whether
+    /// `subscription_id` has at least one visible event with
+    /// `sequence > after_sequence`.
+    pub async fn subscription_visible_after(
+        &self,
+        subscription_id: i64,
+        stream_id: i64,
+        after_sequence: u64,
+        access: &Access,
+    ) -> Result<bool, ToolError> {
+        with_reader_access(&self.reader, &self.access_refresh, access, move |reader, access| {
+            reader.check_access(stream_id, access)?;
+            reader.has_visible_after(subscription_id, after_sequence)
+        })
+        .await
     }
 
     pub async fn read_description(
         &self,
         handle: &str,
-        caller: Option<&str>,
+        access: &Access,
         id: RequestId,
         max_bytes: u64,
         extend: bool,
     ) -> Result<Value, ToolError> {
         let handle = handle.to_owned();
-        let caller = caller.map(str::to_owned);
-        with_store(&self.store, move |store| {
-            store.read_description(&handle, caller.as_deref(), &id, max_bytes, extend)
+        with_store_access(&self.store, &self.access_refresh, access, move |store, access| {
+            store.read_description(&handle, access, &id, max_bytes, extend)
         })
         .await
     }
@@ -404,23 +733,27 @@ impl Queue {
     pub async fn acknowledge_pending(
         &self,
         handle: &str,
-        caller: Option<&str>,
+        access: &Access,
     ) -> Result<Value, ToolError> {
         let reading = handle.to_owned();
-        let caller = caller.map(str::to_owned);
-        let reader = caller.clone();
-        let pending = with_store(&self.store, move |store| {
-            store.pending_description(&reading, reader.as_deref())
-        })
-        .await?;
+        let pending =
+            with_store_access(&self.store, &self.access_refresh, access, move |store, access| {
+                store.pending_description(&reading, access)
+            })
+            .await?;
         let Some(batch_id) = pending["batch_id"].as_str().map(str::to_owned) else {
             return Ok(crate::json(&AckToolResult::Empty));
         };
         let handle = handle.to_owned();
-        let admission = with_store(&self.store, move |store| {
-            store.admit(&handle, caller.as_deref(), Some(&batch_id), false)
-        })
-        .await?;
+        let admission =
+            with_store_access(&self.store, &self.access_refresh, access, move |store, access| {
+                store.admit(&handle, access, Some(&batch_id), false)
+            })
+            .await?;
+        if let Some(seq) = admission.acked_sequence {
+            self.signals
+                .subscription_acked(admission.subscription_id, seq);
+        }
         let ack_result = admission
             .ack
             .ok_or_else(|| ToolError::internal("the acknowledgement was not applied"))?;
@@ -433,12 +766,11 @@ impl Queue {
     pub async fn receive(
         &self,
         arguments: Value,
-        caller: Option<&str>,
+        access: &Access,
         delivery: Delivery,
     ) -> Result<Admitted, ToolError> {
         let request: ReceiveArgs = serde_json::from_value(arguments)
             .map_err(|error| ToolError::invalid(format!("invalid arguments: {error}")))?;
-        let caller = caller.map(str::to_owned);
         if request.max_events == 0 {
             let (Some(ack), None, None) = (request.ack, request.max_bytes, request.wait) else {
                 return Err(ToolError::invalid(
@@ -446,10 +778,17 @@ impl Queue {
                 ));
             };
             let handle = request.handle;
-            let admission = with_store(&self.store, move |store| {
-                store.admit(&handle, caller.as_deref(), Some(&ack), false)
-            })
+            let admission = with_store_access(
+                &self.store,
+                &self.access_refresh,
+                access,
+                move |store, access| store.admit(&handle, access, Some(&ack), false),
+            )
             .await?;
+            if let Some(seq) = admission.acked_sequence {
+                self.signals
+                    .subscription_acked(admission.subscription_id, seq);
+            }
             let ack_result = admission
                 .ack
                 .ok_or_else(|| ToolError::internal("the acknowledgement was not applied"))?;
@@ -471,16 +810,26 @@ impl Queue {
             max_bytes: max_bytes.min(RESULT_LIMIT),
             wait,
         };
-        let admission = with_store(&self.store, move |store| {
-            store.admit(&handle, caller.as_deref(), ack.as_deref(), true)
-        })
+        let admission = with_store_access(
+            &self.store,
+            &self.access_refresh,
+            access,
+            move |store, access| store.admit(&handle, access, ack.as_deref(), true),
+        )
         .await?;
+        if let Some(seq) = admission.acked_sequence {
+            self.signals
+                .subscription_acked(admission.subscription_id, seq);
+        }
         // Wakes an older receive of this subscription, which then ends as superseded.
         self.signals
             .owner_taken(admission.subscription_id, admission.generation);
         let waiter = Waiter {
             commits: self.signals.commits(admission.stream_id),
             owners: self.signals.owners(admission.subscription_id),
+            access_changed: self.signals.access_changed(admission.stream_id),
+            enrollment_changed: self.signals.enrollment_changed(),
+            refresh_access: Arc::clone(&self.access_refresh),
             signals: Arc::clone(&self.signals),
             store: Arc::clone(&self.store),
             admission,
@@ -490,18 +839,18 @@ impl Queue {
         waiter.first_look().await
     }
 
-    /// The inbox an address names, if `caller` may read it.
-    pub async fn inbox(&self, uri: &str, caller: Option<&str>) -> Result<Inbox, ToolError> {
+    /// The inbox an address names, if `access` may read it.
+    pub async fn inbox(&self, uri: &str, access: &Access) -> Result<Inbox, ToolError> {
         let handle = inbox_handle(uri).ok_or_else(inbox_not_found)?.to_owned();
         let uri = uri.to_owned();
-        let caller = caller.map(str::to_owned);
-        with_reader(&self.reader, move |reader| {
+        with_reader_access(&self.reader, &self.access_refresh, access, move |reader, access| {
             let (subscription_id, stream_id) = reader.inbox(&handle)?;
-            reader.check_access(stream_id, caller.as_deref())?;
+            reader.check_access(stream_id, access)?;
             Ok(Inbox {
-                uri,
+                uri: uri.clone(),
                 subscription_id,
                 stream_id,
+                access: access.clone(),
             })
         })
         .await
@@ -524,49 +873,98 @@ impl Queue {
     pub async fn read_inbox(
         &self,
         uri: &str,
-        caller: Option<&str>,
+        access: &Access,
         request_id: RequestId,
         modern: bool,
     ) -> Result<ReadResourceResult, ToolError> {
         let handle = inbox_handle(uri).ok_or_else(inbox_not_found)?.to_owned();
         let uri = uri.to_owned();
-        let caller = caller.map(str::to_owned);
-        with_store(&self.store, move |store| {
-            store.read_inbox(&handle, caller.as_deref(), &uri, &request_id, modern)
+        with_store_access(&self.store, &self.access_refresh, access, move |store, access| {
+            store.read_inbox(&handle, access, &uri, &request_id, modern)
         })
         .await
     }
 
     /// Calls `notify` once if the inbox already has something to read, then
-    /// once for every commit to its stream, until `notify` returns false.
-    /// Commits are subscribed to before storage is checked, so a commit that
-    /// lands during the check is still notified.
+    /// once for every commit to its stream, until `notify` returns false or
+    /// access / subscription existence is revoked.
+    /// Commits and access changes are subscribed to before storage is checked,
+    /// so a commit or revocation that lands during the check is still observed.
     pub async fn watch_inbox<F, Fut>(&self, inbox: &Inbox, mut notify: F)
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = bool>,
     {
         let mut commits = self.signals.commits(inbox.stream_id);
-        let subscription_id = inbox.subscription_id;
-        let unread = with_reader(&self.reader, move |reader| {
-            reader.inbox_unread(subscription_id)
-        })
-        .await;
-        // If storage cannot say, an update is only a hint to read: send it.
-        if !matches!(unread, Ok(false)) && !notify().await {
+        let mut access_changed = self.signals.access_changed(inbox.stream_id);
+        let mut enrollment_changed = self.signals.enrollment_changed();
+        let mut owners = self.signals.owners(inbox.subscription_id);
+        let _ = commits.borrow_and_update();
+        let _ = access_changed.borrow_and_update();
+        let _ = enrollment_changed.borrow_and_update();
+        if *owners.borrow_and_update() == i64::MAX {
             return;
         }
-        while commits.changed().await.is_ok() {
-            let unread = with_reader(&self.reader, move |reader| {
-                reader.inbox_unread(subscription_id)
-            })
-            .await;
-            if !matches!(unread, Ok(false)) && !notify().await {
-                return;
+        let subscription_id = inbox.subscription_id;
+        let stream_id = inbox.stream_id;
+        let check = || {
+            with_reader_access(
+                &self.reader,
+                &self.access_refresh,
+                &inbox.access,
+                move |reader, access| {
+                    reader.check_access(stream_id, access)?;
+                    reader.inbox_unread(subscription_id)
+                },
+            )
+        };
+        match check().await {
+            Ok(true) => {
+                if !notify().await {
+                    return;
+                }
+            }
+            Ok(false) => {}
+            Err(_) => return,
+        }
+        loop {
+            tokio::select! {
+                biased;
+                changed = owners.changed() => {
+                    if changed.is_err() || *owners.borrow_and_update() == i64::MAX {
+                        return;
+                    }
+                }
+                changed = enrollment_changed.changed() => {
+                    if changed.is_err() || check().await.is_err() {
+                        return;
+                    }
+                }
+                changed = access_changed.changed() => {
+                    if changed.is_err() || check().await.is_err() {
+                        return;
+                    }
+                }
+                changed = commits.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    match check().await {
+                        Ok(true) => {
+                            if !notify().await {
+                                return;
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(_) => return,
+                    }
+                }
             }
         }
     }
 }
+
+pub type AccessRefresher = Arc<dyn Fn(&Access) -> Result<Access, ToolError> + Send + Sync>;
 
 /// A receive with nothing to deliver yet.
 pub struct Waiter {
@@ -577,12 +975,24 @@ pub struct Waiter {
     delivery: Delivery,
     commits: watch::Receiver<u64>,
     owners: watch::Receiver<i64>,
+    access_changed: watch::Receiver<u64>,
+    enrollment_changed: watch::Receiver<u64>,
+    refresh_access: SharedRefresher,
 }
 
 impl Waiter {
-    async fn first_look(self) -> Result<Admitted, ToolError> {
+    /// Attaches a live authority refresher so a kept token's parked `receive`
+    /// adopts the reloaded `enrollment_digest` across `SIGHUP` while a removed
+    /// or fenced token fails closed (`Opus RR2-01`, `Sol RR-01`).
+    pub fn with_access_refresh(mut self, refresh_access: AccessRefresher) -> Self {
+        self.refresh_access = Arc::new(Mutex::new(Some(refresh_access)));
+        self
+    }
+
+    async fn first_look(mut self) -> Result<Admitted, ToolError> {
+        let _ = self.enrollment_changed.borrow_and_update();
         match self.select().await? {
-            Selection::Empty if self.bounds.wait => Ok(Admitted::Waiting(self)),
+            Selection::Empty if self.bounds.wait => Ok(Admitted::Waiting(Box::new(self))),
             selection => self
                 .conclude(selection, WaitEnd::Backlog)
                 .await
@@ -590,8 +1000,8 @@ impl Waiter {
         }
     }
 
-    /// Waits until events are committed or a newer receive (or deletion) takes
-    /// over, whichever comes first.
+    /// Waits until events are committed or a newer receive (or deletion /
+    /// access revocation) takes over, whichever comes first.
     pub async fn wait(mut self) -> Result<Value, ToolError> {
         let _guard = self.signals.enter_wait(self.admission.subscription_id);
         if *self.owners.borrow_and_update() != self.admission.generation {
@@ -605,6 +1015,24 @@ impl Waiter {
                         return Ok(self.superseded());
                     }
                 }
+                changed = self.enrollment_changed.changed() => {
+                    if changed.is_err() {
+                        return Ok(self.superseded());
+                    }
+                    match self.select().await? {
+                        Selection::Empty => {}
+                        selection => return self.conclude(selection, WaitEnd::Commit).await,
+                    }
+                }
+                changed = self.access_changed.changed() => {
+                    if changed.is_err() {
+                        return Ok(self.superseded());
+                    }
+                    match self.select().await? {
+                        Selection::Empty => {}
+                        selection => return self.conclude(selection, WaitEnd::Commit).await,
+                    }
+                }
                 changed = self.commits.changed() => {
                     changed.map_err(|_| ToolError::internal("the commit signal closed"))?;
                     match self.select().await? {
@@ -616,17 +1044,26 @@ impl Waiter {
         }
     }
 
-    async fn select(&self) -> Result<Selection, ToolError> {
-        let admission = self.admission.clone();
+    async fn select(&mut self) -> Result<Selection, ToolError> {
+        let mut admission = self.admission.clone();
         let bounds = self.bounds.clone();
         let id = self.delivery.request_id.clone();
-        with_store(&self.store, move |store| {
-            store.select(&admission, &bounds, &id)
-        })
-        .await
+        let (selection, refreshed_access) = with_store_access(
+            &self.store,
+            &self.refresh_access,
+            &self.admission.access,
+            move |store, access| {
+                admission.access = access.clone();
+                let selection = store.select(&admission, &bounds, &id)?;
+                Ok((selection, admission.access.clone()))
+            },
+        )
+        .await?;
+        self.admission.access = refreshed_access;
+        Ok(selection)
     }
 
-    async fn conclude(&self, selection: Selection, fresh: WaitEnd) -> Result<Value, ToolError> {
+    async fn conclude(&mut self, selection: Selection, fresh: WaitEnd) -> Result<Value, ToolError> {
         let (batch, ended_by) = match selection {
             Selection::Superseded => return Ok(self.superseded()),
             Selection::Empty => return Ok(self.empty()),
@@ -634,13 +1071,19 @@ impl Waiter {
             Selection::Sealed(batch) => (batch, fresh),
         };
         let wait = self.report(ended_by);
-        let admission = self.admission.clone();
+        let mut admission = self.admission.clone();
         let bounds = self.bounds.clone();
         let id = self.delivery.request_id.clone();
         let modern = self.delivery.modern;
-        let result = with_store(&self.store, move |store| {
-            store.release(&admission, &batch, wait, &bounds, &id, modern)
-        })
+        let result = with_store_access(
+            &self.store,
+            &self.refresh_access,
+            &self.admission.access,
+            move |store, access| {
+                admission.access = access.clone();
+                store.release(&admission, &batch, wait.clone(), &bounds, &id, modern)
+            },
+        )
         .await?;
         Ok(crate::json(&result))
     }
@@ -727,6 +1170,20 @@ fn page_limit(after: Option<&str>, limit: Option<u64>) -> Result<u64, ToolError>
     Ok(limit)
 }
 
+fn refresh_access_with(
+    refresher: &SharedRefresher,
+    access: &Access,
+) -> Result<Access, ToolError> {
+    let maybe = refresher
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    match maybe {
+        Some(refresh) => refresh(access),
+        None => Ok(access.clone()),
+    }
+}
+
 async fn with_store<T, F>(store: &SharedStore, work: F) -> Result<T, ToolError>
 where
     T: Send + 'static,
@@ -741,15 +1198,65 @@ where
     .map_err(|error| ToolError::internal(format!("the storage task failed: {error}")))?
 }
 
-async fn with_reader<T, F>(reader: &SharedReader, work: F) -> Result<T, ToolError>
+async fn with_store_access<T, F>(
+    store: &SharedStore,
+    refresher: &SharedRefresher,
+    access: &Access,
+    mut work: F,
+) -> Result<T, ToolError>
 where
     T: Send + 'static,
-    F: FnOnce(&dyn QueueReader) -> Result<T, ToolError> + Send + 'static,
+    F: FnMut(&mut dyn QueueStore, &Access) -> Result<T, ToolError> + Send + 'static,
+{
+    let store = Arc::clone(store);
+    let refresher = Arc::clone(refresher);
+    let access = access.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
+        let current = refresh_access_with(&refresher, &access)?;
+        match work(store.as_mut(), &current) {
+            Err(err) if err.code == ErrorCode::AuthorityFenced => {
+                let refreshed = refresh_access_with(&refresher, &access)?;
+                if refreshed.enrollment_digest != current.enrollment_digest {
+                    work(store.as_mut(), &refreshed)
+                } else {
+                    Err(err)
+                }
+            }
+            other => other,
+        }
+    })
+    .await
+    .map_err(|error| ToolError::internal(format!("the storage task failed: {error}")))?
+}
+
+async fn with_reader_access<T, F>(
+    reader: &SharedReader,
+    refresher: &SharedRefresher,
+    access: &Access,
+    mut work: F,
+) -> Result<T, ToolError>
+where
+    T: Send + 'static,
+    F: FnMut(&dyn QueueReader, &Access) -> Result<T, ToolError> + Send + 'static,
 {
     let reader = Arc::clone(reader);
+    let refresher = Arc::clone(refresher);
+    let access = access.clone();
     tokio::task::spawn_blocking(move || {
         let reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
-        work(reader.as_ref())
+        let current = refresh_access_with(&refresher, &access)?;
+        match work(reader.as_ref(), &current) {
+            Err(err) if err.code == ErrorCode::AuthorityFenced => {
+                let refreshed = refresh_access_with(&refresher, &access)?;
+                if refreshed.enrollment_digest != current.enrollment_digest {
+                    work(reader.as_ref(), &refreshed)
+                } else {
+                    Err(err)
+                }
+            }
+            other => other,
+        }
     })
     .await
     .map_err(|error| ToolError::internal(format!("the reader task failed: {error}")))?

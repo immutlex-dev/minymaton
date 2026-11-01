@@ -71,9 +71,9 @@ pub enum StartAt {
 #[schemars(extend("type" = "object"), transform = flat_action_schema)]
 pub enum SubscriptionArgs {
     Create {
-        /// The existing stream to join. Defaults to agents.
-        #[serde(default = "default_stream")]
-        stream: String,
+        /// The existing stream to join. Defaults to the caller's bound channel
+        /// when authenticated with a channel-bound token, or `agents` otherwise.
+        stream: Option<String>,
         /// An assigned unique label. Omit to atomically claim the smallest free agent-N.
         label: Option<String>,
         /// Where the subscription starts: "latest" (default when omitting label)
@@ -84,21 +84,18 @@ pub enum SubscriptionArgs {
         metadata: Option<BTreeMap<String, Value>>,
     },
     Recover {
-        #[serde(default = "default_stream")]
-        stream: String,
+        stream: Option<String>,
         label: String,
         /// Optional updated identity metadata for this subscription.
         metadata: Option<BTreeMap<String, Value>>,
     },
     Delete {
-        #[serde(default = "default_stream")]
-        stream: String,
+        stream: Option<String>,
         /// The subscription label to retire and remove from the stream.
         label: String,
     },
     List {
-        #[serde(default = "default_stream")]
-        stream: String,
+        stream: Option<String>,
         /// Return labels strictly after this label, from a previous page.
         after: Option<String>,
         /// Maximum page size, 1 to 100. Defaults to 100; byte bounds may return fewer.
@@ -164,10 +161,6 @@ fn flat_action_schema(schema: &mut schemars::Schema) {
 }
 
 pub const DEFAULT_STREAM: &str = "agents";
-
-fn default_stream() -> String {
-    DEFAULT_STREAM.to_owned()
-}
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct SubscriptionEntry {

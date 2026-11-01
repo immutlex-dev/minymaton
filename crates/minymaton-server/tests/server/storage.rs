@@ -11,8 +11,9 @@ use minymaton_core::api::{
     AckOutcome, ReceiveResult, StartAt, StreamResult, SubscriptionResult, WaitEnd, WaitReport,
 };
 use minymaton_core::{
-    Admission, Admitted, Batch, Bounds, Delivery, ErrorCode, Membership, Publication, Published,
-    Queue, QueueReader, QueueStore, Reader, Selection, Store, ToolError, inbox_uri,
+    Access, Admission, Admitted, AgentBindingRow, Batch, Bounds, DeletedStream, Delivery,
+    ErrorCode, Membership, Publication, Published, Queue, QueueReader, QueueStore, Reader,
+    Selection, Store, ToolError, inbox_uri,
 };
 use rmcp::model::{ReadResourceResult, RequestId};
 use serde_json::{Value, json};
@@ -38,8 +39,9 @@ fn delivery(id: i64) -> Delivery {
 }
 
 async fn receive_now(queue: &Queue, arguments: Value, id: i64) -> Value {
+    let access = Access::default();
     match queue
-        .receive(arguments, None, delivery(id))
+        .receive(arguments, &access, delivery(id))
         .await
         .expect("receive")
     {
@@ -61,19 +63,20 @@ fn message_ids(batch: &Value) -> Vec<Value> {
 async fn queue_with_the_sqlite_backend_manages_streams_and_subscriptions() {
     let (_dir, path) = database();
     let queue = sqlite_queue(&path);
+    let access = Access::default();
 
     let created = queue
-        .stream(json!({"action": "create", "name": "orders"}), None)
+        .stream(json!({"action": "create", "name": "orders"}), &access)
         .await
         .expect("create stream");
     assert_eq!(created, json!({"status": "created", "stream": "orders"}));
     let duplicate = queue
-        .stream(json!({"action": "create", "name": "orders"}), None)
+        .stream(json!({"action": "create", "name": "orders"}), &access)
         .await
         .expect_err("a stream name is unique");
     assert_eq!(duplicate.code, ErrorCode::StreamExists);
     let listed = queue
-        .stream(json!({"action": "list"}), None)
+        .stream(json!({"action": "list"}), &access)
         .await
         .expect("list streams");
     assert_eq!(listed["status"], "listed");
@@ -85,7 +88,7 @@ async fn queue_with_the_sqlite_backend_manages_streams_and_subscriptions() {
                 "action": "create", "stream": "orders", "label": "worker",
                 "start_at": "earliest", "metadata": {"role": "consumer"}
             }),
-            None,
+            &access,
         )
         .await
         .expect("claim subscription");
@@ -97,7 +100,7 @@ async fn queue_with_the_sqlite_backend_manages_streams_and_subscriptions() {
     let taken = queue
         .subscription(
             json!({"action": "create", "stream": "orders", "label": "worker"}),
-            None,
+            &access,
         )
         .await
         .expect_err("a claimed label is not claimed twice");
@@ -109,7 +112,7 @@ async fn queue_with_the_sqlite_backend_manages_streams_and_subscriptions() {
                 "action": "recover", "stream": "orders", "label": "worker",
                 "metadata": {"role": "restarted"}
             }),
-            None,
+            &access,
         )
         .await
         .expect("recover subscription");
@@ -118,7 +121,7 @@ async fn queue_with_the_sqlite_backend_manages_streams_and_subscriptions() {
     assert_eq!(recovered["metadata"], json!({"role": "restarted"}));
 
     let listed = queue
-        .subscription(json!({"action": "list", "stream": "orders"}), None)
+        .subscription(json!({"action": "list", "stream": "orders"}), &access)
         .await
         .expect("list subscriptions");
     assert_eq!(listed["status"], "listed");
@@ -131,7 +134,7 @@ async fn queue_with_the_sqlite_backend_manages_streams_and_subscriptions() {
     let deleted = queue
         .subscription(
             json!({"action": "delete", "stream": "orders", "label": "worker"}),
-            None,
+            &access,
         )
         .await
         .expect("delete subscription");
@@ -142,18 +145,18 @@ async fn queue_with_the_sqlite_backend_manages_streams_and_subscriptions() {
     let gone = queue
         .subscription(
             json!({"action": "recover", "stream": "orders", "label": "worker"}),
-            None,
+            &access,
         )
         .await
         .expect_err("a deleted subscription is not recoverable");
     assert_eq!(gone.code, ErrorCode::SubscriptionNotFound);
     let inbox = queue
-        .inbox(&inbox_uri(&handle), None)
+        .inbox(&inbox_uri(&handle), &access)
         .await
         .expect_err("a deleted subscription has no inbox");
     assert_eq!(inbox.code, ErrorCode::SubscriptionNotFound);
     let listed = queue
-        .subscription(json!({"action": "list", "stream": "orders"}), None)
+        .subscription(json!({"action": "list", "stream": "orders"}), &access)
         .await
         .expect("list subscriptions");
     assert_eq!(listed["subscriptions"], json!([]));
@@ -163,14 +166,15 @@ async fn queue_with_the_sqlite_backend_manages_streams_and_subscriptions() {
 async fn queue_with_the_sqlite_backend_publishes_idempotently_and_acks_atomically() {
     let (_dir, path) = database();
     let queue = sqlite_queue(&path);
+    let access = Access::default();
     queue
-        .stream(json!({"action": "create", "name": "orders"}), None)
+        .stream(json!({"action": "create", "name": "orders"}), &access)
         .await
         .expect("create stream");
     let claimed = queue
         .subscription(
             json!({"action": "create", "stream": "orders", "label": "worker"}),
-            None,
+            &access,
         )
         .await
         .expect("claim subscription");
@@ -179,7 +183,7 @@ async fn queue_with_the_sqlite_backend_publishes_idempotently_and_acks_atomicall
     let first = queue
         .publish(
             json!({"stream": "orders", "idempotency_key": "k1", "payload": {"n": 1}}),
-            None,
+            &access,
         )
         .await
         .expect("publish");
@@ -188,7 +192,7 @@ async fn queue_with_the_sqlite_backend_publishes_idempotently_and_acks_atomicall
     let retried = queue
         .publish(
             json!({"stream": "orders", "idempotency_key": "k1", "payload": {"n": 1}}),
-            None,
+            &access,
         )
         .await
         .expect("an identical retry succeeds");
@@ -196,7 +200,7 @@ async fn queue_with_the_sqlite_backend_publishes_idempotently_and_acks_atomicall
     let conflict = queue
         .publish(
             json!({"stream": "orders", "idempotency_key": "k1", "payload": {"n": 2}}),
-            None,
+            &access,
         )
         .await
         .expect_err("a reused key with a new payload is refused");
@@ -226,7 +230,7 @@ async fn queue_with_the_sqlite_backend_publishes_idempotently_and_acks_atomicall
                 "stream": "orders", "idempotency_key": "k2", "payload": {"n": 2},
                 "ack": batch_id
             }),
-            None,
+            &access,
         )
         .await
         .expect("publish with ack");
@@ -240,7 +244,7 @@ async fn queue_with_the_sqlite_backend_publishes_idempotently_and_acks_atomicall
                 "stream": "orders", "idempotency_key": "k3", "payload": {"n": 3},
                 "ack": batch_id
             }),
-            None,
+            &access,
         )
         .await
         .expect("acking an acked batch again is harmless");
@@ -272,14 +276,15 @@ async fn queue_with_the_sqlite_backend_publishes_idempotently_and_acks_atomicall
 async fn a_waiting_receive_over_the_backend_is_woken_by_a_commit() {
     let (_dir, path) = database();
     let queue = sqlite_queue(&path);
+    let access = Access::default();
     queue
-        .stream(json!({"action": "create", "name": "orders"}), None)
+        .stream(json!({"action": "create", "name": "orders"}), &access)
         .await
         .expect("create stream");
     let claimed = queue
         .subscription(
             json!({"action": "create", "stream": "orders", "label": "worker"}),
-            None,
+            &access,
         )
         .await
         .expect("claim subscription");
@@ -288,7 +293,7 @@ async fn a_waiting_receive_over_the_backend_is_woken_by_a_commit() {
     let admitted = queue
         .receive(
             json!({"handle": handle, "max_events": 10, "max_bytes": 16384}),
-            None,
+            &access,
             delivery(1),
         )
         .await
@@ -300,7 +305,7 @@ async fn a_waiting_receive_over_the_backend_is_woken_by_a_commit() {
     let published = queue
         .publish(
             json!({"stream": "orders", "idempotency_key": "wake", "payload": "now"}),
-            None,
+            &access,
         )
         .await
         .expect("publish");
@@ -315,16 +320,17 @@ fn the_sqlite_backend_serves_the_queue_commands_through_the_traits() {
     let (_dir, path) = database();
     let mut store: Box<dyn QueueStore> = Box::new(Store::open(&path).expect("open store"));
     let reader: Box<dyn QueueReader> = Box::new(Reader::open(&path).expect("open reader"));
+    let access = Access::default();
 
     assert!(matches!(
-        store.create_stream("orders", None, None).expect("create stream"),
+        store.create_stream("orders", &access, None).expect("create stream"),
         StreamResult::Created { stream } if stream == "orders"
     ));
     let metadata = BTreeMap::from([("role".to_owned(), json!("consumer"))]);
-    let SubscriptionResult::Created { handle, label, .. } = store
+    let (SubscriptionResult::Created { handle, label, .. }, _, _) = store
         .claim_subscription(
             "orders",
-            None,
+            &access,
             Some("worker"),
             Some(StartAt::Earliest),
             Some(metadata),
@@ -335,7 +341,7 @@ fn the_sqlite_backend_serves_the_queue_commands_through_the_traits() {
     };
     assert_eq!(label, "worker");
     let SubscriptionResult::Listed { subscriptions, .. } = reader
-        .list_subscriptions("orders", None, None, 10, &HashSet::new())
+        .list_subscriptions("orders", &access, None, 10, &HashSet::new())
         .expect("list subscriptions")
     else {
         panic!("list must list");
@@ -351,7 +357,7 @@ fn the_sqlite_backend_serves_the_queue_commands_through_the_traits() {
             sender_label: None,
             recipient_label: None,
             ack: None,
-            publisher: None,
+            access: &access,
             claims: None,
             digest: b"k1-digest",
         })
@@ -366,7 +372,7 @@ fn the_sqlite_backend_serves_the_queue_commands_through_the_traits() {
             sender_label: None,
             recipient_label: None,
             ack: None,
-            publisher: None,
+            access: &access,
             claims: None,
             digest: b"k1-digest",
         })
@@ -383,7 +389,7 @@ fn the_sqlite_backend_serves_the_queue_commands_through_the_traits() {
             sender_label: None,
             recipient_label: None,
             ack: None,
-            publisher: None,
+            access: &access,
             claims: None,
             digest: b"other-digest",
         })
@@ -400,7 +406,7 @@ fn the_sqlite_backend_serves_the_queue_commands_through_the_traits() {
         wait: false,
     };
     let id = RequestId::Number(1);
-    let admission: Admission = store.admit(&handle, None, None, true).expect("admit");
+    let admission: Admission = store.admit(&handle, &access, None, true).expect("admit");
     assert_eq!(admission.subscription_id, subscription_id);
     assert_eq!(admission.stream_id, stream_id);
     assert!(admission.ack.is_none());
@@ -433,7 +439,9 @@ fn the_sqlite_backend_serves_the_queue_commands_through_the_traits() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].payload, json!("hello"));
 
-    let retaken = store.admit(&handle, None, None, true).expect("admit again");
+    let retaken = store
+        .admit(&handle, &access, None, true)
+        .expect("admit again");
     assert!(retaken.generation > admission.generation);
     let superseded = store.select(&admission, &bounds, &id).expect("select");
     assert!(
@@ -446,50 +454,56 @@ fn the_sqlite_backend_serves_the_queue_commands_through_the_traits() {
     assert_eq!(pending.batch_id, batch.batch_id);
 
     let acked = store
-        .admit(&handle, None, Some(&batch.batch_id), false)
+        .admit(&handle, &access, Some(&batch.batch_id), false)
         .expect("ack");
     let ack = acked.ack.expect("ack result");
     assert_eq!(ack.batch_id, batch.batch_id);
     assert!(matches!(ack.outcome, AckOutcome::Committed));
     assert!(!reader.inbox_unread(subscription_id).expect("unread"));
-    let owner = store.admit(&handle, None, None, true).expect("admit");
+    let owner = store.admit(&handle, &access, None, true).expect("admit");
     assert!(matches!(
         store.select(&owner, &bounds, &id).expect("select"),
         Selection::Empty
     ));
 
-    let followed = store
-        .follow_stream("agent-x", None, "orders")
+    let (_stream_id, _sub_id, followed) = store
+        .follow_stream("agent-x", "agent-x", &access, "orders")
         .expect("follow stream");
+    let (_, _, bound_stream, bound_label, bound_handle) = reader
+        .agent_binding("agent-x")
+        .expect("binding")
+        .expect("some binding");
     assert_eq!(
-        reader.agent_binding("agent-x").expect("binding"),
-        Some(("orders".to_owned(), "agent-x".to_owned(), followed.clone()))
+        (bound_stream, bound_label, bound_handle),
+        ("orders".to_owned(), "agent-x".to_owned(), followed.clone())
     );
     assert_eq!(
         store
-            .ensure_subscription("orders", "agent-x")
-            .expect("ensure existing"),
+            .ensure_subscription("orders", "agent-x", &access)
+            .expect("ensure existing")
+            .2,
         followed
     );
-    let fresh = store
-        .ensure_subscription("fresh", "first")
+    let (_, _, fresh) = store
+        .ensure_subscription("fresh", "first", &access)
         .expect("ensure creates stream and subscription");
     assert!(reader.inbox(&fresh).is_ok());
-    let StreamResult::Listed { streams, .. } = reader.list_streams(None, None, 10).expect("list")
+    let StreamResult::Listed { streams, .. } =
+        reader.list_streams(&access, None, 10).expect("list")
     else {
         panic!("list must list");
     };
     assert_eq!(streams, vec!["fresh".to_owned(), "orders".to_owned()]);
 
-    let SubscriptionResult::Recovered { handle: same, .. } = store
-        .recover_subscription("orders", None, "worker", None)
+    let (SubscriptionResult::Recovered { handle: same, .. }, _, _) = store
+        .recover_subscription("orders", &access, "worker", None)
         .expect("recover")
     else {
         panic!("recover must recover");
     };
     assert_eq!(same, handle);
-    let (deleted, deleted_id) = store
-        .delete_subscription("orders", None, "worker")
+    let (deleted, deleted_id, _) = store
+        .delete_subscription("orders", &access, "worker")
         .expect("delete");
     assert!(matches!(deleted, SubscriptionResult::Deleted { .. }));
     assert_eq!(deleted_id, subscription_id);
@@ -525,72 +539,98 @@ impl QueueStore for RecordingStore {
     fn create_stream(
         &mut self,
         name: &str,
-        caller: Option<&str>,
+        access: &Access,
         members: Option<&[String]>,
     ) -> Result<StreamResult, ToolError> {
         self.record("create_stream");
-        self.inner.create_stream(name, caller, members)
+        self.inner.create_stream(name, access, members)
     }
 
     fn change_member(
         &mut self,
         name: &str,
-        caller: Option<&str>,
+        access: &Access,
         member: &str,
         change: Membership,
-    ) -> Result<StreamResult, ToolError> {
+    ) -> Result<(StreamResult, Option<i64>), ToolError> {
         self.record("change_member");
-        self.inner.change_member(name, caller, member, change)
+        self.inner.change_member(name, access, member, change)
     }
 
     fn claim_subscription(
         &mut self,
         stream: &str,
-        caller: Option<&str>,
+        access: &Access,
         label: Option<&str>,
         start_at: Option<StartAt>,
         metadata: Option<BTreeMap<String, Value>>,
-    ) -> Result<SubscriptionResult, ToolError> {
+    ) -> Result<(SubscriptionResult, i64, i64), ToolError> {
         self.record("claim_subscription");
         self.inner
-            .claim_subscription(stream, caller, label, start_at, metadata)
+            .claim_subscription(stream, access, label, start_at, metadata)
     }
 
     fn recover_subscription(
         &mut self,
         stream: &str,
-        caller: Option<&str>,
+        access: &Access,
         label: &str,
         metadata: Option<BTreeMap<String, Value>>,
-    ) -> Result<SubscriptionResult, ToolError> {
+    ) -> Result<(SubscriptionResult, i64, i64), ToolError> {
         self.record("recover_subscription");
         self.inner
-            .recover_subscription(stream, caller, label, metadata)
+            .recover_subscription(stream, access, label, metadata)
     }
 
     fn delete_subscription(
         &mut self,
         stream: &str,
-        caller: Option<&str>,
+        access: &Access,
         label: &str,
-    ) -> Result<(SubscriptionResult, i64), ToolError> {
+    ) -> Result<(SubscriptionResult, i64, Option<String>), ToolError> {
         self.record("delete_subscription");
-        self.inner.delete_subscription(stream, caller, label)
+        self.inner.delete_subscription(stream, access, label)
     }
 
     fn follow_stream(
         &mut self,
-        agent: &str,
-        caller: Option<&str>,
+        agent_key: &str,
+        label: &str,
+        access: &Access,
         stream: &str,
-    ) -> Result<String, ToolError> {
+    ) -> Result<(i64, i64, String), ToolError> {
         self.record("follow_stream");
-        self.inner.follow_stream(agent, caller, stream)
+        self.inner.follow_stream(agent_key, label, access, stream)
     }
 
-    fn ensure_subscription(&mut self, stream: &str, label: &str) -> Result<String, ToolError> {
+    fn ensure_subscription(
+        &mut self,
+        stream: &str,
+        label: &str,
+        access: &Access,
+    ) -> Result<(i64, i64, String), ToolError> {
         self.record("ensure_subscription");
-        self.inner.ensure_subscription(stream, label)
+        self.inner.ensure_subscription(stream, label, access)
+    }
+
+    fn provision_channel(&mut self, channel: &str) -> Result<(), ToolError> {
+        self.record("provision_channel");
+        self.inner.provision_channel(channel)
+    }
+
+    fn delete_stream(&mut self, stream: &str) -> Result<DeletedStream, ToolError> {
+        self.record("delete_stream");
+        self.inner.delete_stream(stream)
+    }
+
+    fn activate_enrollment(
+        &mut self,
+        channels: &[String],
+        digest: [u8; 32],
+        expected: Option<[u8; 32]>,
+    ) -> Result<bool, ToolError> {
+        self.record("activate_enrollment");
+        self.inner.activate_enrollment(channels, digest, expected)
     }
 
     fn publish(&mut self, publication: Publication<'_>) -> Result<Published, ToolError> {
@@ -601,12 +641,12 @@ impl QueueStore for RecordingStore {
     fn admit(
         &mut self,
         handle: &str,
-        caller: Option<&str>,
+        access: &Access,
         ack: Option<&str>,
         take_ownership: bool,
     ) -> Result<Admission, ToolError> {
         self.record("admit");
-        self.inner.admit(handle, caller, ack, take_ownership)
+        self.inner.admit(handle, access, ack, take_ownership)
     }
 
     fn select(
@@ -636,35 +676,31 @@ impl QueueStore for RecordingStore {
     fn read_inbox(
         &mut self,
         handle: &str,
-        caller: Option<&str>,
+        access: &Access,
         uri: &str,
         id: &RequestId,
         modern: bool,
     ) -> Result<ReadResourceResult, ToolError> {
         self.record("read_inbox");
-        self.inner.read_inbox(handle, caller, uri, id, modern)
+        self.inner.read_inbox(handle, access, uri, id, modern)
     }
 
     fn read_description(
         &mut self,
         handle: &str,
-        caller: Option<&str>,
+        access: &Access,
         id: &RequestId,
         max_bytes: u64,
         extend: bool,
     ) -> Result<Value, ToolError> {
         self.record("read_description");
         self.inner
-            .read_description(handle, caller, id, max_bytes, extend)
+            .read_description(handle, access, id, max_bytes, extend)
     }
 
-    fn pending_description(
-        &mut self,
-        handle: &str,
-        caller: Option<&str>,
-    ) -> Result<Value, ToolError> {
+    fn pending_description(&mut self, handle: &str, access: &Access) -> Result<Value, ToolError> {
         self.record("pending_description");
-        self.inner.pending_description(handle, caller)
+        self.inner.pending_description(handle, access)
     }
 }
 
@@ -685,30 +721,30 @@ impl RecordingReader {
 impl QueueReader for RecordingReader {
     fn list_streams(
         &self,
-        caller: Option<&str>,
+        access: &Access,
         after: Option<&str>,
         limit: u64,
     ) -> Result<StreamResult, ToolError> {
         self.record("list_streams");
-        self.inner.list_streams(caller, after, limit)
+        self.inner.list_streams(access, after, limit)
     }
 
     fn list_subscriptions(
         &self,
         stream: &str,
-        caller: Option<&str>,
+        access: &Access,
         after: Option<&str>,
         limit: u64,
         waiting: &HashSet<i64>,
     ) -> Result<SubscriptionResult, ToolError> {
         self.record("list_subscriptions");
         self.inner
-            .list_subscriptions(stream, caller, after, limit, waiting)
+            .list_subscriptions(stream, access, after, limit, waiting)
     }
 
-    fn agent_binding(&self, agent: &str) -> Result<Option<(String, String, String)>, ToolError> {
+    fn agent_binding(&self, agent_key: &str) -> Result<Option<AgentBindingRow>, ToolError> {
         self.record("agent_binding");
-        self.inner.agent_binding(agent)
+        self.inner.agent_binding(agent_key)
     }
 
     fn inbox_unread(&self, subscription_id: i64) -> Result<bool, ToolError> {
@@ -716,14 +752,29 @@ impl QueueReader for RecordingReader {
         self.inner.inbox_unread(subscription_id)
     }
 
+    fn has_visible_after(
+        &self,
+        subscription_id: i64,
+        after_sequence: u64,
+    ) -> Result<bool, ToolError> {
+        self.record("has_visible_after");
+        self.inner
+            .has_visible_after(subscription_id, after_sequence)
+    }
+
     fn inbox(&self, handle: &str) -> Result<(i64, i64), ToolError> {
         self.record("inbox");
         self.inner.inbox(handle)
     }
 
-    fn check_access(&self, stream_id: i64, caller: Option<&str>) -> Result<(), ToolError> {
+    fn check_access(&self, stream_id: i64, access: &Access) -> Result<(), ToolError> {
         self.record("check_access");
-        self.inner.check_access(stream_id, caller)
+        self.inner.check_access(stream_id, access)
+    }
+
+    fn enrollment_digest(&self) -> Result<Option<[u8; 32]>, ToolError> {
+        self.record("enrollment_digest");
+        self.inner.enrollment_digest()
     }
 }
 
@@ -742,14 +793,15 @@ async fn the_queue_dispatches_every_command_through_an_external_backend() {
             calls: Arc::clone(&reads),
         }),
     );
+    let access = Access::default();
 
     queue
-        .stream(json!({"action": "create", "name": "orders"}), None)
+        .stream(json!({"action": "create", "name": "orders"}), &access)
         .await
         .expect("create stream");
     assert_eq!(take(&writes), ["create_stream"]);
     let listed = queue
-        .stream(json!({"action": "list"}), None)
+        .stream(json!({"action": "list"}), &access)
         .await
         .expect("list streams");
     assert_eq!(listed["streams"], json!(["orders"]));
@@ -758,7 +810,7 @@ async fn the_queue_dispatches_every_command_through_an_external_backend() {
     let claimed = queue
         .subscription(
             json!({"action": "create", "stream": "orders", "label": "worker"}),
-            None,
+            &access,
         )
         .await
         .expect("claim");
@@ -766,7 +818,7 @@ async fn the_queue_dispatches_every_command_through_an_external_backend() {
     queue
         .subscription(
             json!({"action": "recover", "stream": "orders", "label": "worker"}),
-            None,
+            &access,
         )
         .await
         .expect("recover");
@@ -775,7 +827,7 @@ async fn the_queue_dispatches_every_command_through_an_external_backend() {
         ["claim_subscription", "recover_subscription"]
     );
     queue
-        .subscription(json!({"action": "list", "stream": "orders"}), None)
+        .subscription(json!({"action": "list", "stream": "orders"}), &access)
         .await
         .expect("list subscriptions");
     assert_eq!(take(&reads), ["list_subscriptions"]);
@@ -783,7 +835,7 @@ async fn the_queue_dispatches_every_command_through_an_external_backend() {
     let published = queue
         .publish(
             json!({"stream": "orders", "idempotency_key": "k1", "payload": "one"}),
-            None,
+            &access,
         )
         .await
         .expect("publish");
@@ -807,14 +859,14 @@ async fn the_queue_dispatches_every_command_through_an_external_backend() {
     assert_eq!(take(&writes), ["admit"]);
 
     let uri = inbox_uri(&handle);
-    let inbox = queue.inbox(&uri, None).await.expect("inbox");
+    let inbox = queue.inbox(&uri, &access).await.expect("inbox");
     assert!(queue.is_inbox_blocking(&uri));
     assert_eq!(take(&reads), ["inbox", "check_access", "inbox"]);
 
     let second = queue
         .publish(
             json!({"stream": "orders", "idempotency_key": "k2", "payload": "two"}),
-            None,
+            &access,
         )
         .await
         .expect("publish");
@@ -826,20 +878,20 @@ async fn the_queue_dispatches_every_command_through_an_external_backend() {
         })
         .await;
     assert_eq!(notified, 1, "an unread inbox is notified at once");
-    assert_eq!(take(&reads), ["inbox_unread"]);
+    assert_eq!(take(&reads), ["check_access", "inbox_unread"]);
 
     let read = queue
-        .read_inbox(&uri, None, RequestId::Number(3), true)
+        .read_inbox(&uri, &access, RequestId::Number(3), true)
         .await
         .expect("read inbox");
     assert!(!read.contents.is_empty());
     let description = queue
-        .read_description(&handle, None, RequestId::Number(4), 16384, false)
+        .read_description(&handle, &access, RequestId::Number(4), 16384, false)
         .await
         .expect("read description");
     assert!(description.is_object());
     let pending = queue
-        .acknowledge_pending(&handle, None)
+        .acknowledge_pending(&handle, &access)
         .await
         .expect("acknowledge pending");
     assert_eq!(pending["status"], "acked");
@@ -859,31 +911,35 @@ async fn the_queue_dispatches_every_command_through_an_external_backend() {
     );
 
     let followed = queue
-        .follow("agent-x", None, json!({"stream": "orders"}))
+        .follow("agent-x", &access, json!({"stream": "orders"}))
         .await
         .expect("follow");
     assert_eq!(followed["status"], "following");
-    let binding = queue.agent_binding("agent-x").await.expect("binding");
+    let binding = queue
+        .agent_binding("agent-x", &access)
+        .await
+        .expect("binding")
+        .expect("some binding");
     assert_eq!(
-        binding,
-        Some((
+        (binding.2, binding.3, binding.4),
+        (
             "orders".to_owned(),
             "agent-x".to_owned(),
             followed["handle"].as_str().expect("handle").to_owned()
-        ))
+        )
     );
-    let ensured = queue
-        .prepare_description("orders", "agent-x")
+    let (_, _, ensured) = queue
+        .prepare_description("orders", "agent-x", &access)
         .await
         .expect("prepare description");
     assert_eq!(ensured, followed["handle"].as_str().expect("handle"));
     assert_eq!(take(&writes), ["follow_stream", "ensure_subscription"]);
-    assert_eq!(take(&reads), ["agent_binding"]);
+    assert_eq!(take(&reads), ["agent_binding", "check_access"]);
 
     queue
         .subscription(
             json!({"action": "delete", "stream": "orders", "label": "worker"}),
-            None,
+            &access,
         )
         .await
         .expect("delete");

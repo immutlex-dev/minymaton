@@ -165,6 +165,15 @@ impl Server {
     /// A server started with `--bearer-token-file` containing `tokens_file_content`
     /// and `--request-log`.
     pub async fn start_with_bearer_tokens(tokens_file_content: &str) -> Self {
+        Self::start_with_bearer_tokens_and_options(tokens_file_content, &[]).await
+    }
+
+    /// A server started with `--bearer-token-file` containing `tokens_file_content`,
+    /// `--request-log`, and `extra_options`.
+    pub async fn start_with_bearer_tokens_and_options(
+        tokens_file_content: &str,
+        extra_options: &[&str],
+    ) -> Self {
         let dir = tempfile::Builder::new()
             .prefix("auth-")
             .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
@@ -172,13 +181,29 @@ impl Server {
         let token_file = dir.path().join("tokens.conf");
         std::fs::write(&token_file, tokens_file_content).expect("write tokens.conf");
         let request_log = dir.path().join("requests.jsonl");
-        let options = vec![
+        let mut options = vec![
             "--request-log".to_owned(),
             request_log.to_string_lossy().into_owned(),
             "--bearer-token-file".to_owned(),
             token_file.to_string_lossy().into_owned(),
         ];
+        options.extend(extra_options.iter().map(|opt| (*opt).to_owned()));
         Self::spawn(Arc::new(dir), options).await
+    }
+
+    pub fn token_file(&self) -> PathBuf {
+        self.dir.path().join("tokens.conf")
+    }
+
+    /// Runs `minymaton-server` against this server's storage with `extra_options`
+    /// and returns its exit output.
+    pub fn run_admin(&self, extra_options: &[&str]) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_minymaton-server"))
+            .arg("--db")
+            .arg(self.dir.path().join("queue.sqlite3"))
+            .args(extra_options)
+            .output()
+            .expect("run minymaton-server admin command")
     }
 
     /// Stops this server by its PID and starts it again with the same options
@@ -307,6 +332,12 @@ impl Server {
 
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// Stops this server by its PID, keeping its directory and storage.
+    pub fn stop(&mut self) {
+        self.child.kill().expect("stop the server by its PID");
+        self.child.wait().expect("reap the server");
     }
 
     pub fn db_path(&self) -> PathBuf {
@@ -698,14 +729,16 @@ impl McpClient {
     /// Opens a 2026-07-28 `subscriptions/listen` stream for these resources and
     /// returns once the server has acknowledged it.
     pub async fn listen(&self, uris: &[&str]) -> Subscription {
+        self.try_listen(uris)
+            .await
+            .expect("subscriptions/listen is acknowledged")
+    }
+
+    pub async fn try_listen(&self, uris: &[&str]) -> Result<Subscription, ServiceError> {
         let filter = SubscriptionFilter::builder()
             .resource_subscriptions(uris.iter().copied())
             .build();
-        self.service
-            .peer()
-            .listen(filter)
-            .await
-            .expect("subscriptions/listen is acknowledged")
+        self.service.peer().listen(filter).await
     }
 
     /// Opens a 2026-07-28 `subscriptions/listen` stream for tool-list changes,
@@ -829,16 +862,16 @@ impl PendingCall {
     }
 
     pub async fn finish(self) -> Outcome {
-        let response = self
-            .response
-            .await
-            .expect("tools/call task")
-            .expect("tools/call response");
+        self.finish_result().await.expect("tools/call response")
+    }
+
+    pub async fn finish_result(self) -> Result<Outcome, ServiceError> {
+        let response = self.response.await.expect("tools/call task")?;
         let ServerResult::CallToolResult(result) = response else {
             panic!("{} was answered with {response:?}", self.tool);
         };
         let result = serde_json::to_value(&result).expect("serialize CallToolResult");
-        check_tool_result(&self.tool, &self.schema, &result)
+        Ok(check_tool_result(&self.tool, &self.schema, &result))
     }
 }
 

@@ -12,7 +12,9 @@ use minymaton_core::api::{
     AckToolResult, FollowArgs, FollowResult, PublishArgs, PublishResult, ReceiveArgs,
     ReceiveResult, StreamArgs, StreamResult, SubscriptionArgs, SubscriptionResult,
 };
-use minymaton_core::{Admitted, Delivery, ErrorCode, INBOX_PREFIX, Queue, ToolError};
+use minymaton_core::{
+    Access, Admitted, Delivery, ErrorCode, INBOX_PREFIX, Queue, ToolError, agent_key,
+};
 use rmcp::handler::server::common::{schema_for_input, schema_for_output};
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, Extensions,
@@ -25,15 +27,29 @@ use rmcp::schemars::JsonSchema;
 use rmcp::service::{NotificationContext, RequestContext, SubscriptionContext};
 use rmcp::{ErrorData, RoleServer, ServerHandler};
 use serde_json::Value;
+use tokio::sync::watch;
 use tokio_util::sync::{CancellationToken, DropGuard};
+
+use crate::http::{AuthController, TokenCancel};
 
 /// The subscription whose pending batch a tool list carries: the one the
 /// server options name on `/mcp`, or the one an agent follows on its endpoint.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Binding {
+    pub stream_id: i64,
+    pub subscription_id: i64,
     pub stream: String,
     pub label: String,
     pub handle: String,
+}
+
+/// The `--description-stream` and `--description-subscription` configuration,
+/// plus the startup binding for unbound callers. Channel-bound callers resolve
+/// their own isolated binding on their enrolled channel (`F5`).
+#[derive(Clone, Debug)]
+pub(crate) struct DescriptionSpec {
+    pub label: String,
+    pub default_binding: Binding,
 }
 
 /// How a bound tool list carries the pending batch.
@@ -52,44 +68,6 @@ pub(crate) struct Modes {
 /// The agent an `/mcp/agent/<name>` request is for.
 #[derive(Clone, Debug)]
 pub(crate) struct Agent(pub String);
-
-/// The caller a request's bearer token is enrolled as.
-#[derive(Clone, Debug)]
-pub(crate) struct Caller(pub String);
-
-/// Something that may change a bound tool list.
-#[derive(Clone, Debug)]
-enum Change {
-    /// A publish to this stream committed with optional sender and recipient labels.
-    Stream {
-        stream: String,
-        sender_label: Option<String>,
-        recipient_label: Option<String>,
-    },
-    /// An ACK of the subscription with this handle committed.
-    Handle(String),
-    /// This agent followed a stream or its subscription was deleted.
-    Agent(String),
-}
-
-impl Change {
-    fn concerns(&self, binding: Option<&Binding>) -> bool {
-        match self {
-            Self::Stream {
-                stream,
-                sender_label,
-                recipient_label,
-            } => binding.is_some_and(|binding| {
-                &binding.stream == stream
-                    && sender_label.as_deref() != Some(binding.label.as_str())
-                    && (recipient_label.is_none()
-                        || recipient_label.as_deref() == Some(binding.label.as_str()))
-            }),
-            Self::Handle(handle) => binding.is_some_and(|binding| &binding.handle == handle),
-            Self::Agent(_) => false,
-        }
-    }
-}
 
 /// The fixed tool that acknowledges the named subscription's pending batch.
 const ACK_TOOL: &str = "ack";
@@ -134,17 +112,17 @@ const WINDOW_OPEN: &str = "window open";
 
 pub(crate) struct Minymaton {
     queue: Arc<Queue>,
+    auth: Arc<AuthController>,
     tools: Arc<[Tool]>,
     pushes: Arc<Pushes>,
     /// The subscription the server options bind `/mcp` to.
-    description: Option<Binding>,
+    description: Option<DescriptionSpec>,
     modes: Modes,
     /// Whether this handler serves `/mcp/agent/<name>`, where the binding is
     /// the one the agent follows.
     agent_route: bool,
-    /// Every committed publish, committed ACK and follow. Each open list-change
-    /// subscription announces the ones that concern its binding.
-    tools_changed: tokio::sync::broadcast::Sender<Change>,
+    /// Channel this session/request is confined to, if any.
+    bound_channel: Option<String>,
     notifier_stop: DropGuard,
 }
 
@@ -152,12 +130,13 @@ impl Clone for Minymaton {
     fn clone(&self) -> Self {
         Self {
             queue: Arc::clone(&self.queue),
+            auth: Arc::clone(&self.auth),
             tools: Arc::clone(&self.tools),
             pushes: Arc::clone(&self.pushes),
             description: self.description.clone(),
             modes: self.modes,
             agent_route: self.agent_route,
-            tools_changed: self.tools_changed.clone(),
+            bound_channel: self.bound_channel.clone(),
             // Each HTTP session owns its notifier's lifetime, not the shared template.
             notifier_stop: CancellationToken::new().drop_guard(),
         }
@@ -211,23 +190,49 @@ impl Pushes {
 }
 
 impl Minymaton {
-    pub(crate) fn new(queue: Queue, description: Option<Binding>, modes: Modes) -> Self {
+    pub(crate) fn new(
+        queue: Queue,
+        description: Option<DescriptionSpec>,
+        modes: Modes,
+        auth: Arc<AuthController>,
+    ) -> Self {
+        queue.set_access_refresh(auth.access_refresher());
         Self {
             queue: Arc::new(queue),
+            auth,
             tools: tools().into(),
             pushes: Arc::default(),
             description,
             modes,
             agent_route: false,
-            tools_changed: tokio::sync::broadcast::channel(16).0,
+            bound_channel: None,
             notifier_stop: CancellationToken::new().drop_guard(),
         }
+    }
+
+    fn access(&self, extensions: &Extensions) -> Result<Access, ToolError> {
+        let base = access_of(extensions);
+        if token_cancel_of(extensions).is_some_and(|cancel| cancel.is_cancelled()) {
+            return Err(ToolError::new(
+                ErrorCode::AuthorityFenced,
+                "bearer token or enrollment is no longer active",
+            ));
+        }
+        self.auth.refresh_access(&base)
     }
 
     /// The same queue and change announcements, serving `/mcp/agent/<name>`.
     pub(crate) fn for_agents(&self) -> Self {
         Self {
             agent_route: true,
+            ..self.clone()
+        }
+    }
+
+    /// Scopes this handler instance's `initialize` instructions to `channel`.
+    pub(crate) fn with_channel(&self, channel: Option<String>) -> Self {
+        Self {
+            bound_channel: channel,
             ..self.clone()
         }
     }
@@ -247,23 +252,28 @@ impl Minymaton {
         if self.description.is_some() && self.modes.description {
             names.push(ACK_TOOL);
         }
+        let default_stream = self.bound_channel.as_deref().unwrap_or("agents");
         let mut out = format!(
-            "minymaton is a durable event-driven message queue (registered tools on this endpoint: {}). For agent coordination use the existing agents stream unless the user names another; do not create a separate coordination stream. stream action list discovers streams; subscription action list is the live roster, returning each subscription's label, handle, waiting status, last_active_at, and metadata. waiting is a point-in-time, process-local observation of a receive wait guard, not a durable reservation or proof the remote client is alive. ",
+            "minymaton is a durable event-driven message queue (registered tools on this endpoint: {}). For agent coordination use the existing {default_stream} stream unless the user names another; do not create a separate coordination stream. stream action list discovers streams; subscription action list is the live roster, returning each subscription's label, handle, waiting status, last_active_at, and metadata. waiting is a point-in-time, process-local observation of a receive wait guard, not a durable reservation or proof the remote client is alive. ",
             names.join(", ")
         );
         if self.agent_route {
-            out.push_str(
-                "This agent endpoint binds its tool list to a subscription so pending batches arrive directly in the refreshed tool list instead of a receive loop. Call follow with stream (use agents for agent coordination unless the user names another) to bind this endpoint to its own subscription; do not create a duplicate subscription or recover another agent's label, and use subscription action delete when retiring your own subscription. After obtaining your handle from follow, do one receive with max_events 1, max_bytes 16384, wait false as a health check, reporting any failure immediately and acknowledging any returned batch. ",
-            );
-        } else if let Some(binding) = &self.description {
+            out.push_str(&format!(
+                "This agent endpoint binds its tool list to a subscription so pending batches arrive directly in the refreshed tool list instead of a receive loop. Call follow with stream (use {default_stream} for agent coordination unless the user names another) to bind this endpoint to its own subscription; do not create a duplicate subscription or recover another agent's label, and use subscription action delete when retiring your own subscription. After obtaining your handle from follow, do one receive with max_events 1, max_bytes 16384, wait false as a health check, reporting any failure immediately and acknowledging any returned batch. ",
+            ));
+        } else if let Some(spec) = &self.description {
+            let stream = self
+                .bound_channel
+                .as_deref()
+                .unwrap_or(spec.default_binding.stream.as_str());
             out.push_str(&format!(
                 "This endpoint binds its tool list to subscription {} on stream {} so pending batches arrive directly in the refreshed tool list instead of a receive loop. Do not create a duplicate subscription or recover another agent's label; use subscription action delete when retiring your own subscription. Perform one receive with max_events 1, max_bytes 16384, wait false as a health check, reporting any failure immediately and acknowledging any returned batch. ",
-                binding.label, binding.stream
+                spec.label, stream
             ));
         } else {
-            out.push_str(
-                "Create a subscription with your assigned unique label, or omit label to atomically claim the smallest free agent-N (unassigned claims start_at \"latest\" by default; explicit labels default to \"earliest\" unless start_at is set), and pass metadata (such as {\"harness\": \"...\", \"model\": \"...\", \"host\": \"...\"}) so subscription action list serves as the complete live roster without broadcasting hello messages or running roll calls. Subscription actions default to agents when stream is omitted. Recover a label only when resuming your own subscription, never to take another agent's identity; use subscription action delete when retiring your own subscription. After obtaining your handle, do one receive with max_events 1, max_bytes 16384, wait false as a health check; if the call fails, report the server problem immediately rather than retrying repeatedly, and handle and acknowledge any returned batch normally. ",
-            );
+            out.push_str(&format!(
+                "Create a subscription with your assigned unique label, or omit label to atomically claim the smallest free agent-N (unassigned claims start_at \"latest\" by default; explicit labels default to \"earliest\" unless start_at is set), and pass metadata (such as {{\"harness\": \"...\", \"model\": \"...\", \"host\": \"...\"}}) so subscription action list serves as the complete live roster without broadcasting hello messages or running roll calls. Subscription actions default to {default_stream} when stream is omitted. Recover a label only when resuming your own subscription, never to take another agent's identity; use subscription action delete when retiring your own subscription. After obtaining your handle, do one receive with max_events 1, max_bytes 16384, wait false as a health check; if the call fails, report the server problem immediately rather than retrying repeatedly, and handle and acknowledge any returned batch normally. ",
+            ));
         }
         out.push_str(
             "Designate a single coordinator (typically the user-facing orchestrator or lowest active agent-N). Pass from (your label) and optional to (recipient label, or omit for broadcast) on publish with a fresh idempotency_key (retaining that key and payload if retrying an uncertain publication) so self-echo is suppressed and direct messages go only to the recipient. ",
@@ -293,17 +303,16 @@ impl Minymaton {
 
     /// The binding a request's tool list carries.
     async fn binding(&self, extensions: &Extensions) -> Result<Option<Binding>, ToolError> {
+        let access = self.access(extensions)?;
         if !self.agent_route {
-            return Ok(self.description.clone());
+            return match &self.description {
+                Some(spec) => description_binding(&self.queue, spec, &access).await,
+                None => Ok(None),
+            };
         }
         let agent = agent_of(extensions)
             .ok_or_else(|| ToolError::internal("the request names no agent"))?;
-        agent_binding(&self.queue, &agent).await
-    }
-
-    fn announce(&self, change: Change) {
-        // No open list-change subscription is not a failure.
-        let _ = self.tools_changed.send(change);
+        agent_binding(&self.queue, &agent, &access).await
     }
 
     async fn receive(
@@ -311,24 +320,33 @@ impl Minymaton {
         arguments: Value,
         context: &RequestContext<RoleServer>,
     ) -> Result<Value, ToolError> {
-        let caller = caller_of(&context.extensions);
+        let access = self.access(&context.extensions)?;
+        let token_cancel = token_cancel_of(&context.extensions);
         if context.ct.is_cancelled() {
             return Err(ToolError::new(
                 ErrorCode::RequestCancelled,
                 "receive request was cancelled",
             ));
         }
+        if token_cancel
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(ToolError::new(
+                ErrorCode::AuthorityFenced,
+                "bearer token or enrollment is no longer active",
+            ));
+        }
         let delivery = Delivery {
             request_id: context.id.clone(),
             modern: is_modern(context),
         };
-        match self
-            .queue
-            .receive(arguments, caller.as_deref(), delivery)
-            .await?
-        {
+        match self.queue.receive(arguments, &access, delivery).await? {
             Admitted::Done(result) => Ok(result),
             Admitted::Waiting(waiter) => {
+                let auth = Arc::clone(&self.auth);
+                let waiter = waiter
+                    .with_access_refresh(Arc::new(move |access| auth.refresh_access(access)));
                 let waiting = async {
                     if let Some(token) = context.meta.get_progress_token() {
                         let progress =
@@ -337,10 +355,23 @@ impl Minymaton {
                     }
                     waiter.wait().await
                 };
+                let session_stop = self.notifier_stop.token().clone();
+                let token_cancelled = async {
+                    match &token_cancel {
+                        Some(cancel) => cancel.cancelled().await,
+                        None => std::future::pending::<()>().await,
+                    }
+                };
                 tokio::select! {
                     biased;
                     () = context.ct.cancelled() => {
                         Err(ToolError::new(ErrorCode::RequestCancelled, "receive request was cancelled"))
+                    }
+                    () = token_cancelled => {
+                        Err(ToolError::new(ErrorCode::AuthorityFenced, "bearer token or enrollment is no longer active"))
+                    }
+                    () = session_stop.cancelled() => {
+                        Err(ToolError::new(ErrorCode::RequestCancelled, "session was closed"))
                     }
                     result = waiting => result,
                 }
@@ -380,15 +411,24 @@ impl ServerHandler for Minymaton {
         {
             return;
         }
-        // Subscribed before the binding is read, so no change after the read is missed.
-        let changes = self.tools_changed.subscribe();
         let agent = if self.agent_route {
             agent_of(&context.extensions)
         } else {
             None
         };
-        let description = self.description.clone();
-        let queue = Arc::clone(&self.queue);
+        let Ok(access) = self.access(&context.extensions) else {
+            return;
+        };
+        let token_cancel = token_cancel_of(&context.extensions);
+        let watcher = ToolListWatcher::new(
+            Arc::clone(&self.queue),
+            Arc::clone(&self.auth),
+            token_cancel,
+            agent,
+            self.description.clone(),
+            access,
+        )
+        .await;
         let stop = self.notifier_stop.token().clone();
         tokio::spawn(async move {
             let peer = context.peer;
@@ -410,7 +450,7 @@ impl ServerHandler for Minymaton {
             };
             tokio::select! {
                 () = stop.cancelled() => {}
-                () = announce_changes(queue, agent, description, changes, notify) => {}
+                () = watcher.run(notify) => {}
             }
         });
     }
@@ -430,12 +470,12 @@ impl ServerHandler for Minymaton {
         request: ReadResourceRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
-        let caller = caller_of(&context.extensions);
+        let access = self.access(&context.extensions).map_err(resource_error)?;
         let result = self
             .queue
             .read_inbox(
                 &request.uri,
-                caller.as_deref(),
+                &access,
                 context.id.clone(),
                 is_modern(&context),
             )
@@ -449,12 +489,15 @@ impl ServerHandler for Minymaton {
         request: SubscribeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<(), ErrorData> {
-        let caller = caller_of(&context.extensions);
+        let access = self.access(&context.extensions).map_err(resource_error)?;
+        let token_cancel = token_cancel_of(&context.extensions);
+        let session_stop = self.notifier_stop.token().clone();
         let inbox = self
             .queue
-            .inbox(&request.uri, caller.as_deref())
+            .inbox(&request.uri, &access)
             .await
-            .map_err(resource_error)?;
+            .map_err(resource_error)?
+            .without_enrollment_digest();
         let key = (session_of(&context)?, inbox.uri.clone());
         let (id, stop) = self.pushes.start(key.clone());
         let queue = Arc::clone(&self.queue);
@@ -471,8 +514,16 @@ impl ServerHandler for Minymaton {
                         .is_ok()
                 }
             };
+            let token_cancelled = async {
+                match &token_cancel {
+                    Some(cancel) => cancel.cancelled().await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
             tokio::select! {
                 () = stop.cancelled() => {}
+                () = session_stop.cancelled() => {}
+                () = token_cancelled => {}
                 () = queue.watch_inbox(&inbox, notify) => {}
             }
             pushes.finished(&key, id);
@@ -485,10 +536,10 @@ impl ServerHandler for Minymaton {
         request: UnsubscribeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<(), ErrorData> {
-        let caller = caller_of(&context.extensions);
+        let access = self.access(&context.extensions).map_err(resource_error)?;
         let inbox = self
             .queue
-            .inbox(&request.uri, caller.as_deref())
+            .inbox(&request.uri, &access)
             .await
             .map_err(resource_error)?;
         self.pushes.stop(&(session_of(&context)?, inbox.uri));
@@ -521,22 +572,41 @@ impl ServerHandler for Minymaton {
 
     async fn listen(&self, context: SubscriptionContext) -> Result<(), ErrorData> {
         let tools = context.accepted().tools_list_changed == Some(true);
-        let changes = self.tools_changed.subscribe();
         let agent = if self.agent_route {
             agent_of(&context.request_context().extensions)
         } else {
             None
         };
-        let caller = caller_of(&context.request_context().extensions);
+        let access = self
+            .access(&context.request_context().extensions)
+            .map_err(resource_error)?;
+        let token_cancel = token_cancel_of(&context.request_context().extensions);
+        let session_stop = self.notifier_stop.token().clone();
         let mut inboxes = Vec::new();
         for uri in context.accepted().resource_subscriptions.iter().flatten() {
-            inboxes.push(
-                self.queue
-                    .inbox(uri, caller.as_deref())
-                    .await
-                    .map_err(resource_error)?,
-            );
+            let inbox = self
+                .queue
+                .inbox(uri, &access)
+                .await
+                .map_err(resource_error)?
+                .without_enrollment_digest();
+            inboxes.push(inbox);
         }
+        let tool_watcher = if tools {
+            Some(
+                ToolListWatcher::new(
+                    Arc::clone(&self.queue),
+                    Arc::clone(&self.auth),
+                    token_cancel.clone(),
+                    agent,
+                    self.description.clone(),
+                    access,
+                )
+                .await,
+            )
+        } else {
+            None
+        };
         let watches = inboxes.iter().map(|inbox| {
             let sink = context.sink().clone();
             let uri = inbox.uri.clone();
@@ -555,24 +625,25 @@ impl ServerHandler for Minymaton {
             }
         };
         let announcing = async {
-            if !tools {
+            let Some(watcher) = tool_watcher else {
                 return std::future::pending::<()>().await;
-            }
+            };
             let notify = || {
                 let sink = context.sink().clone();
                 async move { sink.notify_tool_list_changed().await.is_ok() }
             };
-            announce_changes(
-                Arc::clone(&self.queue),
-                agent,
-                self.description.clone(),
-                changes,
-                notify,
-            )
-            .await;
+            watcher.run(notify).await;
+        };
+        let token_cancelled = async {
+            match &token_cancel {
+                Some(cancel) => cancel.cancelled().await,
+                None => std::future::pending::<()>().await,
+            }
         };
         tokio::select! {
             () = context.cancelled() => {}
+            () = session_stop.cancelled() => {}
+            () = token_cancelled => {}
             () = watching => {}
             () = announcing => {}
         }
@@ -596,13 +667,13 @@ impl ServerHandler for Minymaton {
             tools.push(ack_tool());
         }
         let modes = self.modes;
-        let caller = caller_of(&context.extensions);
+        let access = self.access(&context.extensions).map_err(resource_error)?;
         if let Some(binding) = &binding {
             let batch = self
                 .queue
                 .read_description(
                     &binding.handle,
-                    caller.as_deref(),
+                    &access,
                     context.id.clone(),
                     modes.batch_bytes,
                     // A message tool's name pins what its ACK commits, but the
@@ -666,8 +737,6 @@ impl ServerHandler for Minymaton {
     ) -> Result<CallToolResponse, ErrorData> {
         let arguments = Value::Object(request.arguments.unwrap_or_default());
         let name = request.name.as_ref();
-        let caller = caller_of(&context.extensions);
-        let caller = caller.as_deref();
         let bound = if name == ACK_TOOL || name.starts_with(MESSAGE_TOOL) {
             self.binding(&context.extensions)
                 .await
@@ -676,69 +745,36 @@ impl ServerHandler for Minymaton {
             None
         };
         let outcome = match name {
-            "stream" => self.queue.stream(arguments, caller).await,
-            "subscription" => {
-                let is_delete = arguments["action"].as_str() == Some("delete");
-                let label = arguments["label"].as_str().map(str::to_owned);
-                let outcome = self.queue.subscription(arguments, caller).await;
-                if is_delete
-                    && outcome.is_ok()
-                    && let Some(label) = label
-                {
-                    self.announce(Change::Agent(label));
-                }
-                outcome
-            }
-            "publish" => {
-                let stream = arguments["stream"].as_str().map(str::to_owned);
-                let sender_label = arguments["from"]
-                    .as_str()
-                    .or_else(|| arguments["payload"]["from"].as_str())
-                    .map(str::to_owned);
-                let recipient_label = arguments["to"]
-                    .as_str()
-                    .or_else(|| arguments["payload"]["to"].as_str())
-                    .filter(|&label| !matches!(label, "*" | "all" | "broadcast"))
-                    .map(str::to_owned);
-                let outcome = self.queue.publish_committed(arguments, caller).await;
-                if let Ok((_, committed, acked_handle)) = &outcome {
-                    if let Some(handle) = acked_handle {
-                        self.announce(Change::Handle(handle.clone()));
-                    }
-                    if *committed && let Some(stream) = stream {
-                        // Tool lists bound to this stream now show the new message,
-                        // or will once their pending batch is acknowledged.
-                        self.announce(Change::Stream {
-                            stream,
-                            sender_label,
-                            recipient_label,
-                        });
-                    }
-                }
-                outcome.map(|(result, _, _)| result)
-            }
+            "stream" => match self.access(&context.extensions) {
+                Ok(access) => self.queue.stream(arguments, &access).await,
+                Err(error) => Err(error),
+            },
+            "subscription" => match self.access(&context.extensions) {
+                Ok(access) => self.queue.subscription(arguments, &access).await,
+                Err(error) => Err(error),
+            },
+            "publish" => match self.access(&context.extensions) {
+                Ok(access) => self.queue.publish(arguments, &access).await,
+                Err(error) => Err(error),
+            },
             FOLLOW_TOOL if self.agent_route => {
                 let agent = agent_of(&context.extensions)
                     .ok_or_else(|| ErrorData::internal_error("the request names no agent", None))?;
-                let outcome = self.queue.follow(&agent, caller, arguments).await;
-                if outcome.is_ok() {
-                    self.announce(Change::Agent(agent));
+                match self.access(&context.extensions) {
+                    Ok(access) => self.queue.follow(&agent, &access, arguments).await,
+                    Err(error) => Err(error),
                 }
-                outcome
             }
             ACK_TOOL if self.modes.description && bound.is_some() => {
                 let binding = bound.expect("checked above");
-                let outcome = self
-                    .queue
-                    .acknowledge_pending(&binding.handle, caller)
-                    .await;
-                if let Ok(result) = &outcome
-                    && result["ack_result"]["outcome"] == "committed"
-                {
-                    // The description now shows the next batch or "empty".
-                    self.announce(Change::Handle(binding.handle));
+                match self.access(&context.extensions) {
+                    Ok(access) => {
+                        self.queue
+                            .acknowledge_pending(&binding.handle, &access)
+                            .await
+                    }
+                    Err(error) => Err(error),
                 }
-                outcome
             }
             name if name.starts_with(MESSAGE_TOOL) && self.modes.tools && bound.is_some() => {
                 let binding = bound.expect("checked above");
@@ -747,27 +783,9 @@ impl ServerHandler for Minymaton {
                     "max_events": 0,
                     "ack": &name[MESSAGE_TOOL.len()..],
                 });
-                let outcome = self.receive(ack, &context).await;
-                if let Ok(result) = &outcome
-                    && result["ack_result"]["outcome"] == "committed"
-                {
-                    // This tool is gone; the next batch, if any, is a new one.
-                    self.announce(Change::Handle(binding.handle));
-                }
-                outcome
+                self.receive(ack, &context).await
             }
-            "receive" => {
-                let handle = arguments["handle"].as_str().map(str::to_owned);
-                let outcome = self.receive(arguments, &context).await;
-                if let (Ok(result), Some(handle)) = (&outcome, handle)
-                    && result["ack_result"]["outcome"] == "committed"
-                {
-                    // A description bound to this subscription now shows the
-                    // next batch or "empty".
-                    self.announce(Change::Handle(handle));
-                }
-                outcome
-            }
+            "receive" => self.receive(arguments, &context).await,
             other => {
                 return Err(ErrorData::invalid_params(
                     format!("minymaton has no tool named {other:?}"),
@@ -847,13 +865,22 @@ fn follow_tool() -> Tool {
     )
 }
 
-/// The caller a request's bearer token is enrolled as, if the server
+/// The access principal a request's bearer token is enrolled as, if the server
 /// authenticates requests.
-fn caller_of(extensions: &Extensions) -> Option<String> {
+fn access_of(extensions: &Extensions) -> Access {
     extensions
         .get::<http::request::Parts>()
-        .and_then(|parts| parts.extensions.get::<Caller>())
-        .map(|caller| caller.0.clone())
+        .and_then(|parts| parts.extensions.get::<Access>())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The cancellation token associated with the request's bearer token, if any.
+fn token_cancel_of(extensions: &Extensions) -> Option<CancellationToken> {
+    extensions
+        .get::<http::request::Parts>()
+        .and_then(|parts| parts.extensions.get::<TokenCancel>())
+        .map(|cancel| cancel.0.clone())
 }
 
 /// The agent an `/mcp/agent/<name>` request names.
@@ -864,62 +891,533 @@ fn agent_of(extensions: &Extensions) -> Option<String> {
         .map(|agent| agent.0.clone())
 }
 
-async fn agent_binding(queue: &Queue, agent: &str) -> Result<Option<Binding>, ToolError> {
-    Ok(queue
-        .agent_binding(agent)
-        .await?
-        .map(|(stream, label, handle)| Binding {
+async fn agent_binding(
+    queue: &Queue,
+    agent: &str,
+    access: &Access,
+) -> Result<Option<Binding>, ToolError> {
+    Ok(queue.agent_binding(agent, access).await?.map(
+        |(stream_id, subscription_id, stream, label, handle)| Binding {
+            stream_id,
+            subscription_id,
             stream,
             label,
             handle,
-        }))
+        },
+    ))
 }
 
-/// Calls `notify` for every change that concerns the binding, until `notify`
-/// fails or the channel closes. For an agent the binding is read at the start
-/// and again whenever that agent follows a stream.
-async fn announce_changes<F, N>(
-    queue: Arc<Queue>,
-    agent: Option<String>,
-    mut binding: Option<Binding>,
-    mut changes: tokio::sync::broadcast::Receiver<Change>,
-    mut notify: F,
-) where
-    F: FnMut() -> N,
-    N: Future<Output = bool>,
-{
-    let reread = async |agent: &str| {
-        agent_binding(&queue, agent).await.unwrap_or_else(|error| {
-            eprintln!(
-                "minymaton-server: cannot read what agent {agent:?} follows: {}",
-                error.message
-            );
-            None
-        })
+async fn description_binding(
+    queue: &Queue,
+    spec: &DescriptionSpec,
+    access: &Access,
+) -> Result<Option<Binding>, ToolError> {
+    let Some(channel) = &access.channel else {
+        if !queue
+            .check_stream_access(spec.default_binding.stream_id, access)
+            .await?
+        {
+            return Ok(None);
+        }
+        return Ok(Some(spec.default_binding.clone()));
     };
-    if let Some(agent) = &agent {
-        binding = reread(agent).await;
+    let (stream_id, subscription_id, handle) = queue
+        .prepare_description(channel, &spec.label, access)
+        .await?;
+    Ok(Some(Binding {
+        stream_id,
+        subscription_id,
+        stream: channel.clone(),
+        label: spec.label.clone(),
+        handle,
+    }))
+}
+
+struct BindingReceivers {
+    commits: watch::Receiver<u64>,
+    last_commit_seq: u64,
+    acked: watch::Receiver<u64>,
+    owners: watch::Receiver<i64>,
+    access_changed: watch::Receiver<u64>,
+}
+
+impl BindingReceivers {
+    fn new(queue: &Queue, binding: &Binding) -> Self {
+        let mut commits = queue.commits_signal(binding.stream_id);
+        let mut acked = queue.acked_signal(binding.subscription_id);
+        let mut owners = queue.owners_signal(binding.subscription_id);
+        let mut access_changed = queue.access_signal(binding.stream_id);
+        let last_commit_seq = *commits.borrow_and_update();
+        let _ = acked.borrow_and_update();
+        let _ = owners.borrow_and_update();
+        let _ = access_changed.borrow_and_update();
+        Self {
+            commits,
+            last_commit_seq,
+            acked,
+            owners,
+            access_changed,
+        }
     }
-    loop {
-        let concerned = match changes.recv().await {
-            Ok(Change::Agent(name)) => match &agent {
-                Some(agent) if *agent == name => {
-                    binding = reread(agent).await;
+}
+
+enum WatcherEvent {
+    EnrollmentChanged,
+    AgentBound,
+    SubscriptionDeleted,
+    AccessChanged,
+    Acked,
+    Committed,
+    Noop,
+    Closed,
+}
+
+/// Event-driven watcher over `Queue`'s commit, ACK, follow, deletion,
+/// access-change and enrollment-change signals (`PC-05`, `PC-06`). Subscribed
+/// before the initial binding is read so no concurrent change is missed.
+struct ToolListWatcher {
+    queue: Arc<Queue>,
+    auth: Arc<AuthController>,
+    token_cancel: Option<CancellationToken>,
+    enrollment_changed: watch::Receiver<u64>,
+    agent: Option<String>,
+    description: Option<DescriptionSpec>,
+    agent_bound: Option<watch::Receiver<i64>>,
+    access: Access,
+    binding: Option<Binding>,
+    receivers: Option<BindingReceivers>,
+    revoked_access_changed: Option<watch::Receiver<u64>>,
+    initial_notify: bool,
+    fenced: bool,
+}
+
+impl ToolListWatcher {
+    async fn new(
+        queue: Arc<Queue>,
+        auth: Arc<AuthController>,
+        token_cancel: Option<CancellationToken>,
+        agent: Option<String>,
+        description: Option<DescriptionSpec>,
+        access: Access,
+    ) -> Self {
+        let baseline_tick = queue.signal_tick();
+        let mut enrollment_changed = queue.enrollment_signal();
+        let _ = enrollment_changed.borrow_and_update();
+        let agent_bound = agent.as_ref().map(|name| {
+            let key = agent_key(&access, name);
+            let mut rx = queue.agent_bound_signal(&key);
+            let _ = rx.borrow_and_update();
+            rx
+        });
+        let mut watcher = Self {
+            queue,
+            auth,
+            token_cancel,
+            enrollment_changed,
+            agent,
+            description,
+            agent_bound,
+            access,
+            binding: None,
+            receivers: None,
+            revoked_access_changed: None,
+            initial_notify: false,
+            fenced: false,
+        };
+        watcher.sync_binding(baseline_tick).await;
+        watcher
+    }
+
+    fn current_access(&self) -> Result<Access, ToolError> {
+        if self
+            .token_cancel
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(ToolError::new(
+                ErrorCode::AuthorityFenced,
+                "bearer token or enrollment is no longer active",
+            ));
+        }
+        self.auth.refresh_access(&self.access)
+    }
+
+    async fn resolve_raw_binding(
+        queue: &Queue,
+        agent: &Option<String>,
+        description: &Option<DescriptionSpec>,
+        access: &Access,
+    ) -> Result<Option<Binding>, ToolError> {
+        if let Some(agent_name) = agent {
+            match queue.agent_binding_raw(agent_name, access).await {
+                Ok(raw) => Ok(raw.map(
+                    |(stream_id, subscription_id, stream, label, handle)| Binding {
+                        stream_id,
+                        subscription_id,
+                        stream,
+                        label,
+                        handle,
+                    },
+                )),
+                Err(error) if error.code == ErrorCode::AuthorityFenced => Err(error),
+                Err(error) => {
+                    eprintln!(
+                        "minymaton-server: cannot read what agent {agent_name:?} follows: {}",
+                        error.message
+                    );
+                    Ok(None)
+                }
+            }
+        } else if let Some(spec) = description {
+            let Some(channel) = &access.channel else {
+                return Ok(Some(spec.default_binding.clone()));
+            };
+            match queue.prepare_description(channel, &spec.label, access).await {
+                Ok((stream_id, subscription_id, handle)) => Ok(Some(Binding {
+                    stream_id,
+                    subscription_id,
+                    stream: channel.clone(),
+                    label: spec.label.clone(),
+                    handle,
+                })),
+                Err(error) if error.code == ErrorCode::AuthorityFenced => Err(error),
+                Err(_) => Ok(None),
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Subscribes to all stream/subscription watch channels BEFORE taking the
+    /// authoritative store snapshot (`Sol RR-03`, `Sol RR-09`, `Sol RR-13`),
+    /// and reconciles any intervening follow, commit, ACK, deletion, or access
+    /// change scoped to this binding without restarting on unrelated traffic.
+    async fn sync_binding(&mut self, mut baseline_tick: u64) {
+        loop {
+            let access = match self.current_access() {
+                Ok(access) => access,
+                Err(_) => {
+                    self.fenced = true;
+                    self.binding = None;
+                    self.receivers = None;
+                    self.revoked_access_changed = None;
+                    return;
+                }
+            };
+            let candidate = match Self::resolve_raw_binding(
+                &self.queue,
+                &self.agent,
+                &self.description,
+                &access,
+            )
+            .await
+            {
+                Ok(cand) => cand,
+                Err(_) => {
+                    self.fenced = true;
+                    self.binding = None;
+                    self.receivers = None;
+                    self.revoked_access_changed = None;
+                    return;
+                }
+            };
+            let mut verified = None;
+            let mut receivers = None;
+            let mut revoked_access_changed = None;
+            let mut binding_invalidated = false;
+            if let Some(b) = candidate {
+                // Establish `commits`, `acked`, `owners`, and `access_changed`
+                // receivers BEFORE taking the baseline store snapshot (`Sol RR-09`).
+                let mut r = BindingReceivers::new(&self.queue, &b);
+                if self
+                    .queue
+                    .binding_changed_since(b.stream_id, b.subscription_id, baseline_tick)
+                {
+                    self.initial_notify = true;
+                }
+                let deleted_in_flight =
+                    *r.owners.borrow() == i64::MAX || *r.acked.borrow() == u64::MAX;
+                if deleted_in_flight {
+                    self.initial_notify = true;
+                } else {
+                    match self
+                        .queue
+                        .subscription_unread(b.subscription_id, b.stream_id, &access)
+                        .await
+                    {
+                        Ok(_unread_after) => {
+                            if *r.owners.borrow_and_update() == i64::MAX
+                                || *r.acked.borrow() == u64::MAX
+                                || r.access_changed.has_changed().unwrap_or(false)
+                            {
+                                binding_invalidated = true;
+                            } else {
+                                if r.commits.has_changed().unwrap_or(false)
+                                    || r.acked.has_changed().unwrap_or(false)
+                                {
+                                    r.last_commit_seq = *r.commits.borrow_and_update();
+                                    let _ = r.acked.borrow_and_update();
+                                    self.initial_notify = true;
+                                }
+                                verified = Some(b);
+                                receivers = Some(r);
+                            }
+                        }
+                        Err(err) if err.code == ErrorCode::AuthorityFenced => {
+                            self.fenced = true;
+                            self.binding = None;
+                            self.receivers = None;
+                            self.revoked_access_changed = None;
+                            return;
+                        }
+                        Err(_) => {
+                            if r.access_changed.has_changed().unwrap_or(false) {
+                                binding_invalidated = true;
+                            } else {
+                                revoked_access_changed = Some(r.access_changed);
+                            }
+                        }
+                    }
+                }
+            }
+            let agent_changed = self
+                .agent_bound
+                .as_ref()
+                .is_some_and(|rx| rx.has_changed().unwrap_or(false));
+            if agent_changed || binding_invalidated {
+                if let Some(rx) = &mut self.agent_bound {
+                    let _ = rx.borrow_and_update();
+                }
+                self.initial_notify = true;
+                baseline_tick = self.queue.signal_tick();
+                continue;
+            }
+            self.binding = verified;
+            self.receivers = receivers;
+            self.revoked_access_changed = revoked_access_changed;
+            return;
+        }
+    }
+
+    async fn refresh_binding(&mut self) {
+        if let Some(rx) = &mut self.agent_bound {
+            let _ = rx.borrow_and_update();
+        }
+        let baseline_tick = self.queue.signal_tick();
+        self.sync_binding(baseline_tick).await;
+    }
+
+    fn revoke_binding(&mut self) -> bool {
+        let was_bound = self.binding.take().is_some();
+        if let Some(r) = self.receivers.take() {
+            self.revoked_access_changed = Some(r.access_changed);
+        }
+        was_bound
+    }
+
+    async fn next_event(&mut self) -> WatcherEvent {
+        if self.fenced
+            || (self.agent_bound.is_none()
+                && self.receivers.is_none()
+                && self.revoked_access_changed.is_none())
+        {
+            return WatcherEvent::Closed;
+        }
+        let token_cancel = self.token_cancel.clone();
+        let token_cancelled = async {
+            match &token_cancel {
+                Some(cancel) => cancel.cancelled().await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        let agent_changed = async {
+            match &mut self.agent_bound {
+                Some(rx) => rx.changed().await,
+                None => std::future::pending().await,
+            }
+        };
+        match &mut self.receivers {
+            Some(r) => {
+                tokio::select! {
+                    biased;
+                    () = token_cancelled => WatcherEvent::Closed,
+                    res = self.enrollment_changed.changed() => {
+                        if res.is_ok() { WatcherEvent::EnrollmentChanged } else { WatcherEvent::Closed }
+                    }
+                    res = agent_changed => {
+                        if res.is_ok() { WatcherEvent::AgentBound } else { WatcherEvent::Closed }
+                    }
+                    res = r.owners.changed() => {
+                        if res.is_err() || *r.owners.borrow_and_update() == i64::MAX {
+                            WatcherEvent::SubscriptionDeleted
+                        } else {
+                            WatcherEvent::Noop
+                        }
+                    }
+                    res = r.access_changed.changed() => {
+                        if res.is_ok() { WatcherEvent::AccessChanged } else { WatcherEvent::SubscriptionDeleted }
+                    }
+                    res = r.acked.changed() => {
+                        if res.is_err() || *r.acked.borrow_and_update() == u64::MAX {
+                            WatcherEvent::SubscriptionDeleted
+                        } else {
+                            WatcherEvent::Acked
+                        }
+                    }
+                    res = r.commits.changed() => {
+                        if res.is_ok() { WatcherEvent::Committed } else { WatcherEvent::SubscriptionDeleted }
+                    }
+                }
+            }
+            None => {
+                let revoked_access_changed = async {
+                    match &mut self.revoked_access_changed {
+                        Some(rx) => rx.changed().await,
+                        None => std::future::pending().await,
+                    }
+                };
+                tokio::select! {
+                    biased;
+                    () = token_cancelled => WatcherEvent::Closed,
+                    res = self.enrollment_changed.changed() => {
+                        if res.is_ok() { WatcherEvent::EnrollmentChanged } else { WatcherEvent::Closed }
+                    }
+                    res = agent_changed => {
+                        if res.is_ok() { WatcherEvent::AgentBound } else { WatcherEvent::Closed }
+                    }
+                    res = revoked_access_changed => {
+                        if res.is_ok() { WatcherEvent::AccessChanged } else { WatcherEvent::Closed }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn run<F, N>(mut self, mut notify: F)
+    where
+        F: FnMut() -> N,
+        N: Future<Output = bool>,
+    {
+        if self.fenced {
+            return;
+        }
+        if std::mem::take(&mut self.initial_notify) && !notify().await {
+            return;
+        }
+        loop {
+            let should_notify = match self.next_event().await {
+                WatcherEvent::Closed => return,
+                WatcherEvent::Noop => false,
+                WatcherEvent::EnrollmentChanged => {
+                    let Ok(access) = self.current_access() else {
+                        return;
+                    };
+                    if access.enrollment_digest.is_some()
+                        && self.queue.active_enrollment() != access.enrollment_digest
+                    {
+                        return;
+                    }
+                    false
+                }
+                WatcherEvent::AgentBound => {
+                    self.refresh_binding().await;
+                    if self.fenced {
+                        return;
+                    }
                     true
                 }
-                _ => false,
-            },
-            Ok(change) => change.concerns(binding.as_ref()),
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                if let Some(agent) = &agent {
-                    binding = reread(agent).await;
+                WatcherEvent::SubscriptionDeleted => {
+                    if self.agent.is_some() {
+                        self.refresh_binding().await;
+                        if self.fenced {
+                            return;
+                        }
+                    } else {
+                        self.binding = None;
+                        self.receivers = None;
+                        self.revoked_access_changed = None;
+                    }
+                    true
                 }
-                true
+                WatcherEvent::AccessChanged => {
+                    let Ok(access) = self.current_access() else {
+                        return;
+                    };
+                    if let Some(binding) = &self.binding {
+                        match self
+                            .queue
+                            .subscription_unread(
+                                binding.subscription_id,
+                                binding.stream_id,
+                                &access,
+                            )
+                            .await
+                        {
+                            Ok(_) => false,
+                            Err(err) if err.code == ErrorCode::AuthorityFenced => return,
+                            Err(_) => self.revoke_binding(),
+                        }
+                    } else {
+                        self.refresh_binding().await;
+                        if self.fenced {
+                            return;
+                        }
+                        self.binding.is_some() || std::mem::take(&mut self.initial_notify)
+                    }
+                }
+                WatcherEvent::Acked => {
+                    let Ok(access) = self.current_access() else {
+                        return;
+                    };
+                    if let Some(binding) = &self.binding {
+                        match self
+                            .queue
+                            .subscription_unread(
+                                binding.subscription_id,
+                                binding.stream_id,
+                                &access,
+                            )
+                            .await
+                        {
+                            Ok(_) => true,
+                            Err(err) if err.code == ErrorCode::AuthorityFenced => return,
+                            Err(_) => self.revoke_binding(),
+                        }
+                    } else {
+                        false
+                    }
+                }
+                WatcherEvent::Committed => {
+                    let Ok(access) = self.current_access() else {
+                        return;
+                    };
+                    if let (Some(binding), Some(r)) = (&self.binding, &mut self.receivers) {
+                        let new_seq = *r.commits.borrow_and_update();
+                        let after = r.last_commit_seq;
+                        r.last_commit_seq = new_seq;
+                        match self
+                            .queue
+                            .subscription_visible_after(
+                                binding.subscription_id,
+                                binding.stream_id,
+                                after,
+                                &access,
+                            )
+                            .await
+                        {
+                            Ok(true) => true,
+                            Ok(false) => false,
+                            Err(err) if err.code == ErrorCode::AuthorityFenced => return,
+                            Err(_) => self.revoke_binding(),
+                        }
+                    } else {
+                        false
+                    }
+                }
+            };
+            if should_notify && !notify().await {
+                return;
             }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-        };
-        if concerned && !notify().await {
-            return;
         }
     }
 }
@@ -982,8 +1480,9 @@ mod tests {
     async fn cancelled_request_drops_the_parked_waiter_without_delivering() {
         let dir = tempfile::tempdir().unwrap();
         let queue = Queue::open(&dir.path().join("queue.sqlite3")).unwrap();
+        let anon = Access::default();
         queue
-            .stream(json!({"action":"create","name":"orders"}), None)
+            .stream(json!({"action":"create","name":"orders"}), &anon)
             .await
             .unwrap();
         let subscription = queue
@@ -991,12 +1490,13 @@ mod tests {
                 json!({
                     "action":"create","stream":"orders","label":"reader",
                 }),
-                None,
+                &anon,
             )
             .await
             .unwrap();
         let handle = subscription["handle"].as_str().unwrap().to_owned();
         let mut activity = queue.active_waits();
+        let auth = AuthController::new(None, 32, 8, false);
         let handler = Minymaton::new(
             queue,
             None,
@@ -1005,6 +1505,7 @@ mod tests {
                 tools: false,
                 batch_bytes: minymaton_core::RESULT_LIMIT,
             },
+            auth,
         );
         let (to_server, server_in) = futures::channel::mpsc::unbounded();
         let (to_client, client_in) = futures::channel::mpsc::unbounded();
@@ -1039,7 +1540,7 @@ mod tests {
         assert_eq!(*activity.wait_for(|count| *count == 0).await.unwrap(), 0);
         let listed = handler
             .queue
-            .subscription(json!({"action":"list","stream":"orders"}), None)
+            .subscription(json!({"action":"list","stream":"orders"}), &anon)
             .await
             .unwrap();
         assert_eq!(listed["subscriptions"][0]["waiting"], false);
@@ -1049,7 +1550,7 @@ mod tests {
                 json!({
                     "stream":"orders","idempotency_key":"after-cancel","payload":"next",
                 }),
-                None,
+                &anon,
             )
             .await
             .unwrap();
@@ -1057,7 +1558,7 @@ mod tests {
             .queue
             .receive(
                 json!({"handle":handle,"max_events":10,"max_bytes":16384,"wait":false}),
-                None,
+                &anon,
                 Delivery {
                     request_id: rmcp::model::RequestId::Number(2),
                     modern: false,
