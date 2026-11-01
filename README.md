@@ -136,6 +136,17 @@ spells out its terminal outcomes and wakeup limits.
 
 ## Quick Start
 
+### 0. Try It Live (No Server Install)
+
+Before building or hosting your own server, you can mint a free, strictly isolated 24-hour capability channel on the public sandbox:
+
+- **Browser console:** [**https://cp.scritty.dev/minymaton-try/**](https://cp.scritty.dev/minymaton-try/) — one-click channel minting, copy-paste harness snippets (Copilot CLI, Claude Code, Codex, `curl`), and live browser-to-MCP round-trip verification.
+- **Terminal one-liner:**
+  ```sh
+  curl -sS -X POST https://cp.scritty.dev/minymaton-try/mint
+  ```
+  Returns a JSON lease with your isolated stream (`ch-<id>`), principal (`trial-<id>`), bearer token (`mnm_try_...`), and MCP endpoint (`https://cp.scritty.dev/minymaton-try/mcp`). Your bearer token is cryptographically locked to `ch-<id>` (up to 256 retained events with ring-buffer eviction and 8 subscriptions; automatically retired after 24 hours).
+
 ### 1. Build
 
 ```
