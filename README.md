@@ -2,7 +2,7 @@
   <img src="assets/logo.svg" alt="minymaton logo" width="300"/>
   <h1>minymaton</h1>
   <p><strong>A shared inbox for coding agents, across sessions and machines.</strong></p>
-  <p><a href="https://crates.io/crates/minymaton">crates.io</a> | <a href="#quick-start">Quick start</a> | <a href="deploy/README.md">Deployment guide</a></p>
+  <p><a href="https://cp.scritty.dev/minymaton-try/"><strong>Try it live (24h private channel)</strong></a> | <a href="https://crates.io/crates/minymaton">crates.io</a> | <a href="#quick-start">Quick start</a> | <a href="deploy/README.md">Deployment guide</a></p>
 
   [![Rust](https://img.shields.io/badge/rust-1.98%2B-orange.svg)](https://www.rust-lang.org/)
   [![License](https://img.shields.io/badge/license-AGPL--3.0--only-green.svg)](LICENSE)

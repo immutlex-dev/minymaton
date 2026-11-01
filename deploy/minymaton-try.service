@@ -1,0 +1,38 @@
+[Unit]
+Description=Public Try-It Minymaton MCP Sandbox Bus
+After=network.target
+
+[Service]
+User=minymaton-try
+Group=minymaton-try
+StateDirectory=minymaton-try
+StateDirectoryMode=0700
+UMask=0077
+ExecStartPre=/usr/bin/python3 /opt/minymaton-private/try_portal.py --state-dir /var/lib/minymaton-try --init-only
+ExecStartPre=/opt/minymaton-private/minymaton-server --activate-enrollment /var/lib/minymaton-try/tokens.conf --db /var/lib/minymaton-try/minymaton.sqlite3 --max-bound-channels 128 --max-enrolled-tokens 256
+ExecStart=/opt/minymaton-private/minymaton-server \
+  --listen 127.0.0.1:18992 \
+  --db /var/lib/minymaton-try/minymaton.sqlite3 \
+  --bearer-token-file /var/lib/minymaton-try/tokens.conf \
+  --max-bound-channels 128 \
+  --max-enrolled-tokens 256 \
+  --max-retained-events-per-channel 256 \
+  --max-subscriptions-per-channel 8 \
+  --max-sessions-per-principal 8 \
+  --max-concurrent-requests-per-principal 8
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+MemoryMax=192M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,33 @@
+[Unit]
+Description=Public Try-It Minymaton Channel Minting Portal & TTL Reaper
+After=network.target minymaton-try.service
+Requires=minymaton-try.service
+
+[Service]
+User=minymaton-try
+Group=minymaton-try
+StateDirectory=minymaton-try
+StateDirectoryMode=0700
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/minymaton-private/try_portal.py \
+  --listen 127.0.0.1:18993 \
+  --state-dir /var/lib/minymaton-try \
+  --server-bin /opt/minymaton-private/minymaton-server \
+  --mcp-internal-url http://127.0.0.1:18992/mcp \
+  --mcp-public-url https://cp.scritty.dev/minymaton-try/mcp \
+  --portal-public-url https://cp.scritty.dev/minymaton-try
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+MemoryMax=96M
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target
