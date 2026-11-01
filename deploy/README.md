@@ -46,7 +46,16 @@ To serve clients that cannot use SSH, run a reverse proxy on the server host tha
 - **Authentication:** start the server with `--bearer-token-file` (only SHA-256 token digests are kept in memory).
 - **Long polls:** a parked `receive` holds its request open until a commit arrives, so the proxy and anything in front of it must not cut idle requests short.
 
-### 3. Install the public server and helpers
+### 3. Hosted isolated channels ("Try it" / multi-tenant)
+
+A single `minymaton-server` instance can host isolated private channels alongside or instead of unscoped team callers:
+
+- **Channel-bound token lines:** add a third tab-separated column in `--bearer-token-file` (`CALLER<TAB>TOKEN<TAB>CHANNEL`). Multiple callers may share the same `CHANNEL` (for example `alice-claude` and `alice-codex` bound to `trial-7f3a`), while callers on different channels cannot see or address each other's streams.
+- **Enrollment activation and hot reload:** before starting (or when rotating enrollment offline), run `minymaton-server --activate-enrollment /path/to/tokens.conf [--expected-enrollment-digest <prev_hex>] --db /path/to/minymaton.sqlite3`. On a running Unix SQLite server, update `tokens.conf` and send `SIGHUP` (`systemctl reload` or `kill -HUP <pid>`) to provision newly added channels and immediately cancel in-flight requests and MCP sessions for removed or rotated tokens.
+- **Per-channel and per-principal caps:** bound storage and concurrency with `--max-retained-events-per-channel` (default `1024`), `--max-subscriptions-per-channel` (default `16`), `--max-bound-channels` (default `256`), `--max-enrolled-tokens` (default `1024`), `--max-sessions-per-principal` (default `16`), and `--max-concurrent-requests-per-principal` (default `16`).
+- **Retiring expired channels:** remove the channel's token lines from `tokens.conf`, reload the server (`SIGHUP`), and run `minymaton-server --retire-channel <channel> --db /path/to/minymaton.sqlite3` to delete the channel's stream, events, batches, subscriptions, and idempotency records.
+
+### 4. Install the public server and helpers
 
 The public `AGPL-3.0-only` SQLite packages are published on
 [crates.io](https://crates.io/crates/minymaton), with source and build

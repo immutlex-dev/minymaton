@@ -528,6 +528,8 @@ stream  {"action":"create","name":"past-projects","members":["zach","dana"]}
 stream  {"action":"grant","name":"past-projects","caller":"lee"}
 ```
 
+**Channel-bound trial tokens.** Adding a third column to a line in `--bearer-token-file` (`CALLER<TAB>TOKEN<TAB>CHANNEL`) binds that caller exclusively to `CHANNEL` (any valid identifier except `agents`). The server provisions each bound channel as an isolated private stream, defaults omitted `stream` arguments on `subscription` and `follow` to that channel, hides every other stream from `stream` `list`, and refuses stream creation or membership changes by bound callers. On Unix, sending `SIGHUP` reloads `--bearer-token-file` in place—provisioning newly added channels and immediately cancelling in-flight requests and MCP sessions for removed or rotated tokens—while `--retire-channel CHANNEL` deletes a retired channel's stream, events, batches, subscriptions and idempotency records.
+
 ## Tools
 
 `stream` and `subscription` advertise flat object input schemas with an
@@ -563,7 +565,15 @@ not make it optional for every action.
 | `--description-subscription LABEL` | Subscription that the `/mcp` tool list consumes |
 | `--delivery tools\|description\|description,tools` | Each batch as its own tool, inside `receive`'s description, or both (default `description`) |
 | `--batch-bytes N` | Largest batch carried in one tool (default 16384). Set it above 16384 to carry a backlog in one tool |
-| `--bearer-token-file FILE` | Require `Authorization: Bearer <token>` on `/mcp` and `/mcp/agent/<name>`. File contains `CALLER<TAB>TOKEN` or `TOKEN` lines (`>= 32` bytes per token); only SHA-256 digests are retained in memory |
+| `--bearer-token-file FILE` | Require `Authorization: Bearer <token>` on `/mcp` and `/mcp/agent/<name>`. File contains `CALLER<TAB>TOKEN`, `CALLER<TAB>TOKEN<TAB>CHANNEL`, or `TOKEN` lines (`>= 32` bytes per token, `[A-Za-z0-9._-]` for `CALLER` and `CHANNEL`); only SHA-256 digests are retained in memory. Reloads on `SIGHUP` (Unix) |
+| `--activate-enrollment FILE` | Validate `FILE`, provision its bound channels, conditionally update the stored enrollment digest (`--expected-enrollment-digest HEX`), print the new 64-character hex SHA-256 digest, and exit |
+| `--retire-channel CHANNEL` | Fence and delete `CHANNEL` and all of its events, batches, subscriptions and idempotency records, then exit |
+| `--max-retained-events-per-channel N` | Bound retained events per stream/channel by evicting the oldest events beyond `N` (default `1024`) |
+| `--max-subscriptions-per-channel N` | Maximum subscriptions per stream/channel (default `16`) |
+| `--max-bound-channels N` | Maximum provisioned bound channels (default `256`) |
+| `--max-enrolled-tokens N` | Maximum enrolled tokens in `--bearer-token-file` (default `1024`) |
+| `--max-sessions-per-principal N` | Maximum active MCP sessions per principal before evicting the oldest (default `16`) |
+| `--max-concurrent-requests-per-principal N` | Maximum concurrent in-flight HTTP requests per principal before returning `HTTP 429` (default `16`) |
 | `--request-log FILE` | Log every JSON-RPC message with the capabilities the client declared |
 
 ## Storage Alerts
