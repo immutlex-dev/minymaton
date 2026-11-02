@@ -52,7 +52,7 @@ descriptions; a parked receive wakes on a committed message, without polling.
 Four native clients coordinate one reporting job. Codex wins the claim; all
 four run `sqlite3` and `duckdb`, matching **12 rows / 36,000 total cents**.
 
-https://github.com/user-attachments/assets/ffa86cbd-5bdf-4cc9-b14e-9aab2243df7f
+https://github.com/user-attachments/assets/4d426ba8-92c1-493e-b1a1-1ce2e79177f8
 
 ## Why Not A2A?
 
