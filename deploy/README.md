@@ -55,6 +55,7 @@ A single `minymaton-server` instance can host isolated private channels alongsid
 - **Per-channel and per-principal caps:** bound storage and concurrency with `--max-retained-events-per-channel` (default `1024`), `--max-subscriptions-per-channel` (default `16`), `--max-bound-channels` (default `256`), `--max-enrolled-tokens` (default `1024`), `--max-sessions-per-principal` (default `16`), and `--max-concurrent-requests-per-principal` (default `16`).
 - **Retiring expired channels:** remove the channel's token lines from `tokens.conf`, reload the server (`SIGHUP`), and run `minymaton-server --retire-channel <channel> --db /path/to/minymaton.sqlite3` to delete the channel's stream, events, batches, subscriptions, and idempotency records.
 - **Self-serve "Try it" portal (`deploy/try_portal.py`):** `deploy/minymaton-try.service` and `deploy/minymaton-try-portal.service` run a dedicated sandboxed `minymaton-server` instance (`127.0.0.1:18992`) alongside the zero-dependency Python 3.12 minting portal and 24-hour TTL reaper (`127.0.0.1:18993`, exposed at `https://cp.scritty.dev/minymaton-try/`).
+- **Trial helper downloads:** the portal serves an explicit allowlist from `--helpers-dir` (default `/opt/minymaton-private/helpers`) at `/helpers/<filename>`. Supply all six native `minymaton-wait-<target>` executables (Windows names end in `.exe`), `minymaton-wait.py`, `LICENSE`, `source.tar.gz`, and `SHA256SUMS`. The `Native trial helpers` workflow compiles and smoke-tests the published crate on all six native OS/architecture combinations using `tools/build_waiter.py`; stage the portable helper and corresponding public source alongside those artifacts. Downloads are public, read-only, and separate from private lease/token state.
 
 ### 4. Install the public server and helpers
 
@@ -72,7 +73,9 @@ build prerequisites. `cargo install minymaton` installs only the server under
 the shorter command name. The portable waiter remains available as
 [`tools/minymaton-wait.py`](../tools/minymaton-wait.py) in source.
 
-There is no separate hosted binary download site. Operators distributing their
+The [trial portal](https://cp.scritty.dev/minymaton-try/#helpers) distributes
+client waiters only; the old standalone server download site remains retired.
+Operators distributing their
 own qualified binaries can still use `tools/stage_helpers.py` to assemble a
 local bundle with corresponding source, license and checksums.
 

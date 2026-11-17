@@ -13,6 +13,7 @@ import http.client
 import json
 import os
 import secrets
+import shutil
 import signal
 import subprocess
 import threading
@@ -24,6 +25,18 @@ from typing import Any
 
 ANCHOR_CALLER = "try-anchor"
 ANCHOR_CHANNEL = "ch-anchor"
+HELPER_FILES = {
+    "minymaton-wait-x86_64-unknown-linux-gnu",
+    "minymaton-wait-aarch64-unknown-linux-gnu",
+    "minymaton-wait-x86_64-apple-darwin",
+    "minymaton-wait-aarch64-apple-darwin",
+    "minymaton-wait-x86_64-pc-windows-msvc.exe",
+    "minymaton-wait-aarch64-pc-windows-msvc.exe",
+    "minymaton-wait.py",
+    "LICENSE",
+    "source.tar.gz",
+    "SHA256SUMS",
+}
 
 
 class PortalConfig:
@@ -40,6 +53,7 @@ class PortalConfig:
         ttl_seconds: int = 86400,
         per_ip_hourly_limit: int = 5,
         global_hourly_limit: int = 60,
+        helpers_dir: Path = Path("/opt/minymaton-private/helpers"),
     ) -> None:
         self.listen_host = listen_host
         self.listen_port = listen_port
@@ -55,6 +69,7 @@ class PortalConfig:
         self.ttl_seconds = ttl_seconds
         self.per_ip_hourly_limit = per_ip_hourly_limit
         self.global_hourly_limit = global_hourly_limit
+        self.helpers_dir = helpers_dir
 
 
 class LeaseStore:
@@ -1008,6 +1023,24 @@ INDEX_HTML = """<!DOCTYPE html>
       border-radius: 8px;
       font-size: 0.85rem;
     }
+
+    .helper-downloads {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.84rem;
+    }
+
+    .helper-downloads th, .helper-downloads td {
+      padding: 8px;
+      border-bottom: 1px solid var(--border-subtle);
+      text-align: left;
+    }
+
+    .helper-note {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      margin-top: 12px;
+    }
   </style>
 </head>
 <body>
@@ -1098,6 +1131,39 @@ INDEX_HTML = """<!DOCTYPE html>
             </li>
           </ul>
         </div>
+
+        <div class="spec-panel" id="helpers">
+          <div class="spec-title">Download a background wakeup helper</div>
+          <p class="helper-note">Choose the OS running your agent (WSL uses Linux). Native helpers need no Rust or Python installation.</p>
+          <table class="helper-downloads">
+            <thead><tr><th scope="col">Agent OS</th><th scope="col">x64 / Intel</th><th scope="col">ARM64</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">Linux</th><td><a href="__PORTAL_URL__/helpers/minymaton-wait-x86_64-unknown-linux-gnu" download>Linux x64</a></td><td><a href="__PORTAL_URL__/helpers/minymaton-wait-aarch64-unknown-linux-gnu" download>Linux ARM64</a></td></tr>
+              <tr><th scope="row">macOS</th><td><a href="__PORTAL_URL__/helpers/minymaton-wait-x86_64-apple-darwin" download>macOS Intel</a></td><td><a href="__PORTAL_URL__/helpers/minymaton-wait-aarch64-apple-darwin" download>Apple Silicon</a></td></tr>
+              <tr><th scope="row">Windows</th><td><a href="__PORTAL_URL__/helpers/minymaton-wait-x86_64-pc-windows-msvc.exe" download>Windows x64</a></td><td><a href="__PORTAL_URL__/helpers/minymaton-wait-aarch64-pc-windows-msvc.exe" download>Windows ARM64</a></td></tr>
+            </tbody>
+          </table>
+          <p class="helper-note"><a href="__PORTAL_URL__/helpers/minymaton-wait.py" download>Portable Python helper (all OSes)</a> &mdash; Python 3.10+, standard library only. On Windows, use <code>py -3</code> instead of <code>python3</code>.</p>
+          <p class="helper-note"><a href="__PORTAL_URL__/helpers/SHA256SUMS">Checksums</a> &middot; <a href="__PORTAL_URL__/helpers/source.tar.gz" download>Corresponding source</a> &middot; <a href="__PORTAL_URL__/helpers/LICENSE">AGPL-3.0-only license</a></p>
+          <p class="helper-note">Rename the native download to <code>minymaton-wait</code> (<code>minymaton-wait.exe</code> on Windows). Set <code>MINYMATON_TOKEN</code> privately in the agent's environment to your minted token; never pass it in command arguments. Replace <code>YOUR_SUBSCRIPTION_HANDLE</code> with the handle returned by <code>subscription create</code>.</p>
+          <p class="helper-note">Linux / macOS native</p>
+          <div class="code-box" style="margin-top: 10px;">
+            <button type="button" class="code-copy-btn" data-copy-target="helper-unix">Copy</button>
+            <pre id="helper-unix">chmod +x ./minymaton-wait
+./minymaton-wait --url "__MCP_URL__" --handle YOUR_SUBSCRIPTION_HANDLE</pre>
+          </div>
+          <p class="helper-note">Windows native</p>
+          <div class="code-box" style="margin-top: 10px;">
+            <button type="button" class="code-copy-btn" data-copy-target="helper-windows">Copy</button>
+            <pre id="helper-windows">.\\minymaton-wait.exe --url "__MCP_URL__" --handle YOUR_SUBSCRIPTION_HANDLE</pre>
+          </div>
+          <p class="helper-note">Portable Python (all OSes)</p>
+          <div class="code-box" style="margin-top: 10px;">
+            <button type="button" class="code-copy-btn" data-copy-target="helper-python">Copy</button>
+            <pre id="helper-python">python3 ./minymaton-wait.py --url "__MCP_URL__" --handle YOUR_SUBSCRIPTION_HANDLE</pre>
+          </div>
+          <p class="helper-note">Launch one helper per handle using your harness's <strong>background command</strong> tool, not a foreground MCP wait or a shell polling loop. When it completes, handle the batch, ACK it, and explicitly launch the helper again. Never run a second receive against a parked handle. Background-command completion must wake your harness.</p>
+        </div>
       </section>
 
       <section class="ticket-card" aria-live="polite">
@@ -1154,14 +1220,14 @@ INDEX_HTML = """<!DOCTYPE html>
                   <span>Terminal 1 — Listener</span>
                   <button type="button" class="copy-mini" data-copy-target="prompt-t1">Copy</button>
                 </div>
-                <div class="terminal-prompt" id="prompt-t1">Join our Minymaton subscription on stream ch-•••••••• with label "agent-1", then call receive (wait: true, max_events: 5, max_bytes: 16384) and reply when a message arrives.</div>
+                <div class="terminal-prompt" id="prompt-t1">Mint a channel, install a matching helper, and set MINYMATON_TOKEN privately in your agent's environment. Then copy the listener instructions here.</div>
               </div>
               <div class="terminal-card">
                 <div class="terminal-head">
                   <span>Terminal 2 — Sender</span>
                   <button type="button" class="copy-mini" data-copy-target="prompt-t2">Copy</button>
                 </div>
-                <div class="terminal-prompt" id="prompt-t2">Join our Minymaton subscription on stream ch-•••••••• with label "agent-2", publish {"task": "ping from agent-2"} to stream ch-••••••••, and wait for agent-1's reply.</div>
+                <div class="terminal-prompt" id="prompt-t2">Use the same minted channel and token in the second agent session. Install a matching helper and copy the sender instructions here.</div>
               </div>
             </div>
           </div>
@@ -1242,10 +1308,12 @@ INDEX_HTML = """<!DOCTYPE html>
       document.getElementById("probe-list-btn").disabled = false;
       document.getElementById("probe-ping-btn").disabled = false;
 
+      const join = `Create your own subscription on Minymaton stream "${lease.channel}" and save your returned label and handle. Immediately call receive once with wait: false, max_events: 5, max_bytes: 16384; handle any events before ACKing.`;
+      const park = `Use the downloaded native minymaton-wait (minymaton-wait.exe on Windows), or python3 minymaton-wait.py (py -3 on Windows), with --url "${MCP_URL}" --handle YOUR_OWN_RETURNED_HANDLE. MINYMATON_TOKEN must already be set privately in your environment. Start exactly one helper using your harness's background-command tool. Do not use foreground MCP receive(wait: true), polling, or a second receive on the parked handle. On helper completion, handle all events, ACK only after handling (an atomic reply + ACK is allowed), then explicitly re-arm the helper.`;
       document.getElementById("prompt-t1").textContent =
-        `Join our Minymaton subscription on stream "${lease.channel}" with label "agent-1", then call receive (wait: true, max_events: 5, max_bytes: 16384) and reply when a message arrives.`;
+        `${join} ${park} Reply to agent-2's ping using your returned label as from and a fresh idempotency_key.`;
       document.getElementById("prompt-t2").textContent =
-        `Join our Minymaton subscription on stream "${lease.channel}" with label "agent-2", publish {"task": "ping from agent-2"} to stream "${lease.channel}", and wait for agent-1's reply.`;
+        `${join} Publish {"task": "ping from agent-2"} to "${lease.channel}" with your returned label as from and a fresh idempotency_key. ${park}`;
 
       renderConfig();
       if (countdownTimer) clearInterval(countdownTimer);
@@ -1380,7 +1448,8 @@ class TryPortalHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def _send_html(self, status: int, html: str) -> None:
         body = html.encode("utf-8")
@@ -1394,6 +1463,9 @@ class TryPortalHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
+        if path.startswith("/helpers/"):
+            self._send_helper(path.removeprefix("/helpers/"))
+            return
         if path in ("/", "/index.html"):
             rendered = INDEX_HTML.replace("__MCP_URL__", self.cfg.mcp_public_url).replace(
                 "__PORTAL_URL__", self.cfg.portal_public_url
@@ -1404,6 +1476,33 @@ class TryPortalHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, self.store.status_snapshot())
             return
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+
+    def _send_helper(self, name: str, *, head_only: bool = False) -> None:
+        if name not in HELPER_FILES:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+            return
+        try:
+            source = (self.cfg.helpers_dir / name).open("rb")
+        except FileNotFoundError:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "helper_unavailable"})
+            return
+        with source:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+            self.send_header("Content-Length", str(os.fstat(source.fileno()).st_size))
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            if not head_only:
+                shutil.copyfileobj(source, self.wfile)
+
+    def do_HEAD(self) -> None:
+        path = self.path.split("?", 1)[0].rstrip("/") or "/"
+        if path.startswith("/helpers/"):
+            self._send_helper(path.removeprefix("/helpers/"), head_only=True)
+            return
+        self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
@@ -1483,6 +1582,12 @@ def main() -> int:
         help="Public HTTPS base URL for the Try It portal",
     )
     parser.add_argument("--max-active-channels", type=int, default=120)
+    parser.add_argument(
+        "--helpers-dir",
+        type=Path,
+        default=Path("/opt/minymaton-private/helpers"),
+        help="Read-only directory containing the public waiter downloads and source",
+    )
     parser.add_argument("--ttl-seconds", type=int, default=86400)
     parser.add_argument("--init-only", action="store_true", help="Initialize tokens.conf and exit")
     args = parser.parse_args()
@@ -1498,6 +1603,7 @@ def main() -> int:
         portal_public_url=args.portal_public_url,
         max_active_channels=args.max_active_channels,
         ttl_seconds=args.ttl_seconds,
+        helpers_dir=args.helpers_dir,
     )
     store = LeaseStore(cfg)
     if args.init_only:

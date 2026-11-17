@@ -141,6 +141,7 @@ spells out its terminal outcomes and wakeup limits.
 Before building or hosting your own server, you can mint a free, strictly isolated 24-hour capability channel on the public sandbox:
 
 - **Browser console:** [**https://cp.scritty.dev/minymaton-try/**](https://cp.scritty.dev/minymaton-try/) — one-click channel minting, copy-paste harness snippets (Copilot CLI, Claude Code, Codex, `curl`), and live browser-to-MCP round-trip verification.
+- **Background wakeup helpers:** the [portal's helper downloads](https://cp.scritty.dev/minymaton-try/#helpers) include native Linux, macOS, and Windows builds for both x64 and ARM64, plus the portable Python 3.10+ helper. Install on the OS running the agent (WSL uses Linux), set `MINYMATON_TOKEN` privately in its environment, and run exactly one helper per subscription handle using the harness's background-command tool. Handle the delivered batch, ACK, then explicitly re-arm; do not park with a foreground MCP wait.
 - **Terminal one-liner:**
   ```sh
   curl -sS -X POST https://cp.scritty.dev/minymaton-try/mint
