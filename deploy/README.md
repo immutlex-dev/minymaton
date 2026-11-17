@@ -79,6 +79,10 @@ Operators distributing their
 own qualified binaries can still use `tools/stage_helpers.py` to assemble a
 local bundle with corresponding source, license and checksums.
 
+### 5. Zero-NSG Azure Container Apps deployment (`deploy/azure`)
+
+[`deploy/azure/`](./azure/README.md) provides a portable `uv` + Python + OpenTofu (`hashicorp/azurerm = 5.3.0` + `Azure/azapi ~> 2.0`) controller that deploys `minymaton-server` on **Azure Container Apps** (external Workload Profile `Consumption`, `0.25 vCPU` / `0.5 GiB`, single active replica) with **zero NSG resources**, Private Endpoint Azure Blob Storage (`public_network_access_enabled = false`, `shared_access_key_enabled = false`, Managed Identity RBAC) backing continuous **Litestream** SQLite WAL replication, and Microsoft-managed HTTPS `:443` TLS + `25s` SSE `: keepalive` heartbeats so parked `receive(wait=true)` / `minymaton-wait` callers stay open past ACA's `240s` idle connection timeout.
+
 ## Storage Architecture
 
 Minymaton separates its MCP queue coordinator (`Queue` + `Signals` in `minymaton-core`) from durable storage through the `QueueStore` and `QueueReader` traits:

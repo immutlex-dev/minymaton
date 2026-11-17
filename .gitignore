@@ -1,3 +1,9 @@
 /target/
 /tools/compiler-lints/bin/
 /tools/compiler-lints/results/
+/deploy/azure/.venv/
+/deploy/azure/uv.lock
+/deploy/azure/uv.toml
+/deploy/azure/.pytest_cache/
+__pycache__/
+*.egg-info/

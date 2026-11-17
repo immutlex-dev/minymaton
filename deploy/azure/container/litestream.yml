@@ -1,0 +1,10 @@
+dbs:
+  - path: /var/lib/minymaton/minymaton.sqlite3
+    monitor-interval: 1s
+    checkpoint-interval: 1m
+    replica:
+      type: abs
+      account-name: ${STORAGE_ACCOUNT}
+      bucket: ${BLOB_CONTAINER}
+      path: sqlite
+      sync-interval: 1s
