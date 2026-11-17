@@ -862,6 +862,7 @@ INDEX_HTML = """<!DOCTYPE html>
       border-radius: 8px;
       padding: 12px 14px;
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
       justify-content: space-between;
       gap: 12px;
@@ -871,8 +872,8 @@ INDEX_HTML = """<!DOCTYPE html>
       font-family: var(--font-mono);
       font-size: 1rem;
       color: var(--accent-amber);
-      overflow-x: auto;
-      white-space: nowrap;
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
 
     /* Harness Config Tabs */
@@ -916,8 +917,8 @@ INDEX_HTML = """<!DOCTYPE html>
       font-size: 1rem;
       line-height: 1.65;
       color: var(--text-primary);
-      overflow-x: auto;
-      white-space: pre;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
     }
 
     .code-copy-btn {
@@ -946,12 +947,6 @@ INDEX_HTML = """<!DOCTYPE html>
       gap: 12px;
     }
 
-    @media (max-width: 640px) {
-      .handshake-grid {
-        grid-template-columns: 1fr;
-      }
-    }
-
     .terminal-card {
       background: var(--bg-well);
       border: 1px solid var(--border-subtle);
@@ -978,6 +973,7 @@ INDEX_HTML = """<!DOCTYPE html>
       font-size: 1.0625rem;
       color: var(--text-primary);
       line-height: 1.65;
+      overflow-wrap: anywhere;
     }
 
     /* Live Bus Probe Bar */
@@ -1056,6 +1052,7 @@ INDEX_HTML = """<!DOCTYPE html>
       font-size: 1rem;
       color: var(--text-muted);
       margin-top: 12px;
+      overflow-wrap: anywhere;
     }
 
     :focus-visible {
