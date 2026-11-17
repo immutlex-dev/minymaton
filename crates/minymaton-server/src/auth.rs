@@ -225,6 +225,7 @@ impl BearerAuthenticator {
 
     /// Rejects a live `SIGHUP` transition that changes an existing token digest's
     /// `caller` or `channel` in place without rotating/removing that token (`O-R4-2`).
+    #[cfg(unix)]
     pub(crate) fn check_reload_transition(&self, next: &Self) -> Result<(), String> {
         for prev in &self.entries {
             if let Some(retained) = next.entries.iter().find(|entry| entry.digest == prev.digest)

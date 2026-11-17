@@ -5,6 +5,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HOST, HeaderMap, HeaderValue};
@@ -1272,25 +1273,11 @@ async fn post_jsonrpc(
             ),
         }),
     );
-    let body = serde_json::to_vec(&payload)
-        .map_err(|_| Failure::protocol("cannot encode receive request"))?;
-    let request = http::Request::builder()
-        .method("POST")
-        .uri(&url[url::Position::BeforePath..url::Position::AfterQuery])
-        .header(
-            HOST,
-            &url[url::Position::BeforeHost..url::Position::AfterPort],
-        )
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream")
-        .header("MCP-Protocol-Version", revision.as_str())
-        .header("Mcp-Method", "tools/call")
-        .header("Mcp-Name", "receive")
-        .body(Full::new(Bytes::from(body)))
-        .map_err(|error| Failure::transport("cannot encode HTTP request", &error))?;
-    let mut request = request;
-    request.headers_mut().extend(headers);
-    let result = async {
+    let body = Bytes::from(
+        serde_json::to_vec(&payload)
+            .map_err(|_| Failure::protocol("cannot encode receive request"))?,
+    );
+    let result: Result<Value, Failure> = async {
         let host = url
             .host_str()
             .ok_or_else(|| Failure::protocol("invalid MCP endpoint"))?
@@ -1299,44 +1286,73 @@ async fn post_jsonrpc(
         let port = url
             .port_or_known_default()
             .ok_or_else(|| Failure::protocol("invalid MCP port"))?;
-        let tls_config = if url.scheme() == "https" {
-            Some(build_tls_config(ca_file)?)
+        let tls_connector = if url.scheme() == "https" {
+            Some(TlsConnector::from(Arc::new(build_tls_config(ca_file)?)))
         } else {
             None
         };
-        // Tokio tries every resolved IPv4/IPv6 address sequentially, without a fallback timer.
-        let stream = TcpStream::connect((host, port))
-            .await
-            .map_err(|error| Failure::transport("TCP connection failed", &error))?;
-        if let Some(config) = tls_config {
-            let name = rustls::pki_types::ServerName::try_from(host.to_owned())
-                .map_err(|error| Failure::transport("invalid TLS server name", &error))?;
-            let stream = TlsConnector::from(Arc::new(config))
-                .connect(name, stream)
+        let uri = &url[url::Position::BeforePath..url::Position::AfterQuery];
+        let host_header = &url[url::Position::BeforeHost..url::Position::AfterPort];
+        loop {
+            let mut request = http::Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(HOST, host_header)
+                .header(CONTENT_TYPE, "application/json")
+                .header(ACCEPT, "application/json, text/event-stream")
+                .header("MCP-Protocol-Version", revision.as_str())
+                .header("Mcp-Method", "tools/call")
+                .header("Mcp-Name", "receive")
+                .body(Full::new(body.clone()))
+                .map_err(|error| Failure::transport("cannot encode HTTP request", &error))?;
+            request.headers_mut().extend(headers.clone());
+            // Tokio tries every resolved IPv4/IPv6 address sequentially, without a fallback timer.
+            let stream = TcpStream::connect((host, port))
                 .await
-                .map_err(|error| Failure::transport("TLS handshake failed", &error))?;
-            exchange(stream, request).await
-        } else {
-            exchange(stream, request).await
+                .map_err(|error| Failure::transport("TCP connection failed", &error))?;
+            let outcome = if let Some(connector) = &tls_connector {
+                let name = rustls::pki_types::ServerName::try_from(host.to_owned())
+                    .map_err(|error| Failure::transport("invalid TLS server name", &error))?;
+                let stream = connector
+                    .connect(name, stream)
+                    .await
+                    .map_err(|error| Failure::transport("TLS handshake failed", &error))?;
+                exchange(stream, request).await?
+            } else {
+                exchange(stream, request).await?
+            };
+            match outcome {
+                ExchangeOutcome::Message(message) => break Ok(message),
+                ExchangeOutcome::KeepaliveStreamClosed => continue,
+            }
         }
     }
     .await;
     result.map_err(|error| error.redact(&secrets))
 }
 
-async fn exchange<T>(stream: T, request: http::Request<Full<Bytes>>) -> Result<Value, Failure>
+enum ExchangeOutcome {
+    Message(Value),
+    KeepaliveStreamClosed,
+}
+
+async fn exchange<T>(
+    stream: T,
+    request: http::Request<Full<Bytes>>,
+) -> Result<ExchangeOutcome, Failure>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
         .await
         .map_err(|error| Failure::transport("HTTP connection failed", &error))?;
+    let keepalive_idle = AtomicBool::new(false);
     let response = async {
         let response = sender
             .send_request(request)
             .await
             .map_err(|error| Failure::transport("HTTP request failed", &error))?;
-        read_response(response).await
+        read_response(response, &keepalive_idle).await
     };
     tokio::pin!(connection, response);
     // Keep ownership of the connection here so completion or cancellation closes the socket.
@@ -1344,13 +1360,21 @@ where
         biased;
         result = &mut response => result,
         result = &mut connection => {
-            result.map_err(|error| Failure::transport("HTTP connection failed", &error))?;
+            if let Err(error) = result {
+                if keepalive_idle.load(Ordering::Relaxed) {
+                    return Ok(ExchangeOutcome::KeepaliveStreamClosed);
+                }
+                return Err(Failure::transport("HTTP connection failed", &error));
+            }
             response.await
         }
     }
 }
 
-async fn read_response(response: http::Response<Incoming>) -> Result<Value, Failure> {
+async fn read_response(
+    response: http::Response<Incoming>,
+    keepalive_idle: &AtomicBool,
+) -> Result<ExchangeOutcome, Failure> {
     if response.status().as_u16() >= 400 {
         return Err(Failure::new(
             "transport_failed",
@@ -1358,6 +1382,7 @@ async fn read_response(response: http::Response<Incoming>) -> Result<Value, Fail
             7,
         ));
     }
+    let status_ok = response.status().is_success();
     let sse = response
         .headers()
         .get(CONTENT_TYPE)
@@ -1375,13 +1400,22 @@ async fn read_response(response: http::Response<Incoming>) -> Result<Value, Fail
         if !response_matches(&message) {
             return Err(Failure::protocol("missing or mismatched JSON-RPC response"));
         }
-        return Ok(message);
+        return Ok(ExchangeOutcome::Message(message));
     }
     let mut pending = Vec::new();
     let mut data = Vec::new();
+    let mut saw_comment = false;
+    let mut saw_non_comment = false;
     let mut body = response.into_body();
+    let mut body_error = None;
     while let Some(frame) = body.frame().await {
-        let frame = frame.map_err(|error| Failure::transport("HTTP SSE body failed", &error))?;
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(error) => {
+                body_error = Some(error);
+                break;
+            }
+        };
         let Some(chunk) = frame.data_ref() else {
             continue;
         };
@@ -1392,20 +1426,40 @@ async fn read_response(response: http::Response<Incoming>) -> Result<Value, Fail
                 .map_err(|_| Failure::protocol("invalid UTF-8 in SSE response"))?
                 .trim_end_matches(['\r', '\n']);
             if let Some(line) = line.strip_prefix("data:") {
+                saw_non_comment = true;
+                keepalive_idle.store(false, Ordering::Relaxed);
                 data.push(line.trim_start_matches(' ').to_owned());
-            } else if line.is_empty() && !data.is_empty() {
-                let text = data.join("\n");
-                data.clear();
-                let message: Value = serde_json::from_str(&text)
-                    .map_err(|_| Failure::protocol("invalid SSE response JSON"))?;
-                if !message.is_object() {
-                    return Err(Failure::protocol("JSON-RPC response must be an object"));
+            } else if line.is_empty() {
+                if !data.is_empty() {
+                    let text = data.join("\n");
+                    data.clear();
+                    let message: Value = serde_json::from_str(&text)
+                        .map_err(|_| Failure::protocol("invalid SSE response JSON"))?;
+                    if !message.is_object() {
+                        return Err(Failure::protocol("JSON-RPC response must be an object"));
+                    }
+                    if response_matches(&message) {
+                        return Ok(ExchangeOutcome::Message(message));
+                    }
                 }
-                if response_matches(&message) {
-                    return Ok(message);
-                }
+            } else if line.starts_with(':') {
+                saw_comment = true;
+            } else {
+                saw_non_comment = true;
             }
         }
+        let idle = status_ok
+            && saw_comment
+            && !saw_non_comment
+            && data.is_empty()
+            && (pending.is_empty() || pending.starts_with(b":") || pending == b"\r");
+        keepalive_idle.store(idle, Ordering::Relaxed);
+    }
+    if keepalive_idle.load(Ordering::Relaxed) {
+        return Ok(ExchangeOutcome::KeepaliveStreamClosed);
+    }
+    if let Some(error) = body_error {
+        return Err(Failure::transport("HTTP SSE body failed", &error));
     }
     Err(Failure::new(
         "transport_failed",

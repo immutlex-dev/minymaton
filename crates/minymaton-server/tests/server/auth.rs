@@ -228,6 +228,7 @@ async fn mcp_send_reads_its_bearer_token_from_the_named_environment_variable() {
     assert!(!output.contains("connected to"), "{output}");
 }
 
+#[cfg(unix)]
 const CHARLIE_TOKEN: &str = "mny_charlie_0123456789abcdef0123456789abcdef";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

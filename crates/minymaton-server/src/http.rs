@@ -194,6 +194,7 @@ impl AuthController {
         Arc::new(move |base| auth.refresh_access(base))
     }
 
+    #[cfg(unix)]
     fn swap_state(&self, new_auth: &Arc<BearerAuthenticator>) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.token_cancels.retain(|digest, token| {
@@ -218,6 +219,7 @@ impl AuthController {
     /// Commits a SQLite enrollment transition and swaps the active
     /// authenticator atomically under the writer store lock and `reload_lock`
     /// so kept tokens never observe a digest mismatch (`Opus RR3-01`, `Sol RR-12`).
+    #[cfg(unix)]
     pub(crate) async fn reload_sqlite(
         &self,
         queue: &Queue,
@@ -806,6 +808,7 @@ impl NoResumeSessions {
         }
     }
 
+    #[cfg(unix)]
     async fn revoke_removed_tokens(&self, current: &BearerAuthenticator) {
         let revoked_ids: Vec<String> = {
             let owners = self.owners.lock().unwrap_or_else(PoisonError::into_inner);

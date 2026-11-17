@@ -52,10 +52,9 @@ def ini_get(ini: tuple[pathlib.Path, configparser.ConfigParser] | None, key: str
     if ini is None:
         return None
     path, parser = ini
-    if not parser.has_section("minymaton"):
-        return None
+    section = "minymaton" if parser.has_section("minymaton") else configparser.DEFAULTSECT
     try:
-        val = parser.get("minymaton", key, fallback=None)
+        val = parser.get(section, key, fallback=None)
     except configparser.Error as error:
         raise ConfigError(f"{error.__class__.__name__}: {error} in {path}") from error
     return val if val else None
@@ -170,68 +169,110 @@ def post_jsonrpc(
     if parts.query:
         path = f"{path}?{parts.query}"
 
-    if parts.scheme == "https":
-        conn: http.client.HTTPConnection = http.client.HTTPSConnection(
-            host, port, timeout=None, context=build_ssl_context(ca_file)
-        )
-    else:
-        conn = http.client.HTTPConnection(host, port, timeout=None)
-    try:
-        headers = {
-            **base_headers,
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-            "MCP-Protocol-Version": "2026-07-28",
-            "Mcp-Method": payload["method"],
-        }
-        if payload["method"] == "tools/call":
-            headers["Mcp-Name"] = payload["params"]["name"]
-        payload = {
-            **payload,
-            "params": {
-                **payload.get("params", {}),
-                "_meta": {
-                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-                    "io.modelcontextprotocol/clientInfo": {"name": "minymaton-wait", "version": "0.1.0"},
-                    "io.modelcontextprotocol/clientCapabilities": {},
-                },
+    ssl_ctx = build_ssl_context(ca_file) if parts.scheme == "https" else None
+    headers = {
+        **base_headers,
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": payload["method"],
+    }
+    if payload["method"] == "tools/call":
+        headers["Mcp-Name"] = payload["params"]["name"]
+    payload = {
+        **payload,
+        "params": {
+            **payload.get("params", {}),
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientInfo": {"name": "minymaton-wait", "version": "0.1.0"},
+                "io.modelcontextprotocol/clientCapabilities": {},
             },
-        }
-        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        conn.request("POST", path, body=body, headers=headers)
-        resp = conn.getresponse()
-        if resp.status >= 400:
-            raise RuntimeError(f"HTTP {resp.status}")
+        },
+    }
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
-        ctype = (resp.getheader("Content-Type") or "").lower()
-        if "text/event-stream" in ctype:
-            data_lines: list[str] = []
-            while True:
-                raw_line = resp.readline()
-                if not raw_line:
-                    break
-                line = raw_line.decode("utf-8").rstrip("\r\n")
-                if line.startswith("data:"):
-                    data_lines.append(line[5:].lstrip(" "))
-                elif line == "" and data_lines:
-                    event_text = "\n".join(data_lines)
-                    data_lines.clear()
-                    msg = json.loads(event_text)
-                    if not isinstance(msg, dict):
-                        raise ValueError("JSON-RPC response must be an object")
-                    if msg.get("id") == payload.get("id") and ("result" in msg or "error" in msg):
-                        return msg
-            raise RuntimeError("SSE stream closed before JSON-RPC response arrived")
+    while True:
+        if ssl_ctx is not None:
+            conn: http.client.HTTPConnection = http.client.HTTPSConnection(
+                host, port, timeout=None, context=ssl_ctx
+            )
+        else:
+            conn = http.client.HTTPConnection(host, port, timeout=None)
+        try:
+            conn.request("POST", path, body=body, headers=headers)
+            resp = conn.getresponse()
+            if resp.status >= 400:
+                raise RuntimeError(f"HTTP {resp.status}")
 
-        raw = resp.read().decode("utf-8")
-        msg = json.loads(raw)
-        if not isinstance(msg, dict) or msg.get("id") != payload.get("id") or not (
-            "result" in msg or "error" in msg
-        ):
-            raise ValueError("missing or mismatched JSON-RPC response")
-        return msg
-    finally:
-        conn.close()
+            ctype = (resp.getheader("Content-Type") or "").lower()
+            if "text/event-stream" in ctype:
+                status_ok = 200 <= resp.status < 300
+                pending = bytearray()
+                data_lines: list[str] = []
+                saw_comment = False
+                saw_non_comment = False
+                keepalive_idle = False
+                while True:
+                    try:
+                        chunk = resp.read1(4096)
+                    except (OSError, http.client.HTTPException, ssl.SSLError):
+                        if keepalive_idle:
+                            break
+                        raise
+                    if not chunk:
+                        break
+                    pending.extend(chunk)
+                    while True:
+                        end = pending.find(b"\n")
+                        if end < 0:
+                            break
+                        raw_line = bytes(pending[: end + 1])
+                        del pending[: end + 1]
+                        line = raw_line.decode("utf-8").rstrip("\r\n")
+                        if line.startswith("data:"):
+                            saw_non_comment = True
+                            keepalive_idle = False
+                            data_lines.append(line[5:].lstrip(" "))
+                        elif line == "":
+                            if data_lines:
+                                event_text = "\n".join(data_lines)
+                                data_lines.clear()
+                                msg = json.loads(event_text)
+                                if not isinstance(msg, dict):
+                                    raise ValueError("JSON-RPC response must be an object")
+                                if msg.get("id") == payload.get("id") and (
+                                    "result" in msg or "error" in msg
+                                ):
+                                    return msg
+                        elif line.startswith(":"):
+                            saw_comment = True
+                        else:
+                            saw_non_comment = True
+                    keepalive_idle = (
+                        status_ok
+                        and saw_comment
+                        and not saw_non_comment
+                        and not data_lines
+                        and (
+                            not pending
+                            or pending.startswith(b":")
+                            or bytes(pending) == b"\r"
+                        )
+                    )
+                if keepalive_idle:
+                    continue
+                raise RuntimeError("SSE stream closed before JSON-RPC response arrived")
+
+            raw = resp.read().decode("utf-8")
+            msg = json.loads(raw)
+            if not isinstance(msg, dict) or msg.get("id") != payload.get("id") or not (
+                "result" in msg or "error" in msg
+            ):
+                raise ValueError("missing or mismatched JSON-RPC response")
+            return msg
+        finally:
+            conn.close()
 
 
 def main() -> int:

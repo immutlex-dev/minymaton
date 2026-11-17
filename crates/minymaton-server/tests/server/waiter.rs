@@ -2883,3 +2883,340 @@ async fn python_waiter_fallback_delivers_events_and_selects_private_endpoint() {
     server.abort();
     assert!(server.await.unwrap_err().is_cancelled());
 }
+
+fn http_chunk(payload: &[u8]) -> Vec<u8> {
+    let mut out = format!("{:x}\r\n", payload.len()).into_bytes();
+    out.extend_from_slice(payload);
+    out.extend_from_slice(b"\r\n");
+    out
+}
+
+fn decode_http_body(headers: &str, raw_body: &[u8]) -> Vec<u8> {
+    let is_chunked = headers.lines().any(|line| {
+        line.split_once(':').is_some_and(|(k, v)| {
+            k.trim().eq_ignore_ascii_case("transfer-encoding")
+                && v.to_ascii_lowercase().contains("chunked")
+        })
+    });
+    if !is_chunked {
+        return raw_body.to_vec();
+    }
+    let mut out = Vec::new();
+    let mut cursor = raw_body;
+    loop {
+        let end = cursor
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .expect("chunk size CRLF");
+        let size_str = std::str::from_utf8(&cursor[..end])
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .trim();
+        let len = usize::from_str_radix(size_str, 16).unwrap();
+        cursor = &cursor[end + 2..];
+        if len == 0 {
+            break;
+        }
+        out.extend_from_slice(&cursor[..len]);
+        cursor = &cursor[len + 2..];
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cli_and_python_waiters_reconnect_across_mid_sse_keepalive_stream_cuts() {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+
+    for kind in ["rust", "python"] {
+        let (dir, server, upstream_url, handle, mut activity) = parked_fixture().await;
+        let server = tokio_util::task::AbortOnDropHandle::new(server);
+        let upstream_addr = upstream_url
+            .strip_prefix("http://")
+            .unwrap()
+            .strip_suffix("/mcp")
+            .unwrap()
+            .to_owned();
+
+        let client = ()
+            .serve(rmcp::transport::StreamableHttpClientTransport::from_uri(
+                upstream_url.clone(),
+            ))
+            .await
+            .unwrap();
+
+        // Seal a real first batch so we also prove `--ack <batch_id>` survives reconnects.
+        client
+            .call_tool(
+                CallToolRequestParams::new("publish").with_arguments(
+                    json!({"stream":"orders","idempotency_key":format!("{kind}-seed"),"payload":"seed"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .unwrap();
+        let seeded = client
+            .call_tool(
+                CallToolRequestParams::new("receive").with_arguments(
+                    json!({"handle":&handle,"max_events":10,"max_bytes":16384,"wait":false})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .unwrap();
+        let seed_batch_id = seeded.structured_content.unwrap()["batch_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_url = format!("http://{}/mcp", proxy_listener.local_addr().unwrap());
+
+        let (attempt_tx, mut attempt_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(usize, tokio::sync::oneshot::Sender<()>)>();
+
+        let proxy_addr_up = upstream_addr.clone();
+        let proxy_task = tokio::spawn(async move {
+            for attempt in 1..=4usize {
+                let (downstream, _) = proxy_listener.accept().await.unwrap();
+                let mut down_reader = tokio::io::BufReader::new(downstream);
+                let mut req_head = Vec::new();
+                let mut content_len = 0usize;
+                loop {
+                    let mut line = String::new();
+                    let n = down_reader.read_line(&mut line).await.unwrap();
+                    assert!(n > 0, "unexpected client EOF reading request headers");
+                    if let Some((name, val)) = line.split_once(':') {
+                        if name.trim().eq_ignore_ascii_case("content-length") {
+                            content_len = val.trim().parse().unwrap();
+                        }
+                        if !name.trim().eq_ignore_ascii_case("connection")
+                            && !name.trim().eq_ignore_ascii_case("host")
+                        {
+                            req_head.extend_from_slice(line.as_bytes());
+                        }
+                    } else if line != "\r\n" {
+                        req_head.extend_from_slice(line.as_bytes());
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                let mut req_body = vec![0u8; content_len];
+                down_reader.read_exact(&mut req_body).await.unwrap();
+                let mut downstream = down_reader.into_inner();
+
+                let mut up_stream = tokio::net::TcpStream::connect(&proxy_addr_up)
+                    .await
+                    .unwrap();
+                let mut forwarded = req_head;
+                forwarded.extend_from_slice(
+                    format!("Host: {proxy_addr_up}\r\nConnection: close\r\n\r\n").as_bytes(),
+                );
+                forwarded.extend_from_slice(&req_body);
+                up_stream.write_all(&forwarded).await.unwrap();
+                up_stream.flush().await.unwrap();
+
+                let mut sse_start = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+                sse_start.extend_from_slice(&http_chunk(b": keepalive\n\n"));
+                downstream.write_all(&sse_start).await.unwrap();
+                downstream.flush().await.unwrap();
+
+                let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel();
+                attempt_tx.send((attempt, proceed_tx)).unwrap();
+                proceed_rx.await.unwrap();
+
+                match attempt {
+                    1 => {
+                        // Exact ACA Envoy ~33m cut: drop chunked SSE mid-stream with no 0\r\n\r\n.
+                        drop(downstream);
+                        drop(up_stream);
+                    }
+                    2 => {
+                        // Cut mid-comment heartbeat line with no trailing \n or 0\r\n\r\n.
+                        downstream.write_all(&http_chunk(b": keep")).await.unwrap();
+                        downstream.flush().await.unwrap();
+                        drop(downstream);
+                        drop(up_stream);
+                    }
+                    3 => {
+                        // Graceful proxy SSE drain (0\r\n\r\n) after keepalive before any data: event.
+                        downstream.write_all(b"0\r\n\r\n").await.unwrap();
+                        downstream.flush().await.unwrap();
+                        drop(downstream);
+                        drop(up_stream);
+                    }
+                    4 => {
+                        let mut raw_up = Vec::new();
+                        up_stream.read_to_end(&mut raw_up).await.unwrap();
+                        let split = raw_up
+                            .windows(4)
+                            .position(|w| w == b"\r\n\r\n")
+                            .expect("upstream HTTP header terminator");
+                        let up_headers = std::str::from_utf8(&raw_up[..split]).unwrap();
+                        let up_body = decode_http_body(up_headers, &raw_up[split + 4..]);
+                        let up_is_sse = up_headers.lines().any(|line| {
+                            line.split_once(':').is_some_and(|(k, v)| {
+                                k.trim().eq_ignore_ascii_case("content-type")
+                                    && v.to_ascii_lowercase().contains("text/event-stream")
+                            })
+                        });
+                        let sse_payload = if up_is_sse {
+                            up_body
+                        } else {
+                            let text = std::str::from_utf8(&up_body).unwrap();
+                            let mut framed = String::new();
+                            for line in text.lines() {
+                                framed.push_str("data: ");
+                                framed.push_str(line);
+                                framed.push('\n');
+                            }
+                            framed.push('\n');
+                            framed.into_bytes()
+                        };
+                        downstream
+                            .write_all(&http_chunk(&sse_payload))
+                            .await
+                            .unwrap();
+                        downstream.write_all(b"0\r\n\r\n").await.unwrap();
+                        downstream.flush().await.unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        });
+
+        let mut cmd = if kind == "rust" {
+            command(dir.path())
+        } else {
+            python_waiter_command(dir.path())
+        };
+        cmd.args([
+            "--url",
+            &proxy_url,
+            "--handle",
+            &handle,
+            "--ack",
+            &seed_batch_id,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+        let child = cmd.spawn().unwrap();
+        let mut exit_task = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap());
+
+        for expected_attempt in 1..=3usize {
+            let proceed_tx = tokio::select! {
+                maybe_attempt = attempt_rx.recv() => {
+                    let (seen, tx) = maybe_attempt.expect("proxy attempt channel closed");
+                    assert_eq!(seen, expected_attempt, "{kind}: unexpected attempt order");
+                    tx
+                }
+                early_exit = &mut exit_task => {
+                    let out = early_exit.unwrap();
+                    panic!(
+                        "{kind} waiter exited prematurely before attempt {expected_attempt}: status={:?} stdout={} stderr={}",
+                        out.status.code(),
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr),
+                    );
+                }
+            };
+            assert_eq!(*activity.wait_for(|count| *count == 1).await.unwrap(), 1);
+            let _ = proceed_tx.send(());
+        }
+
+        // Wait for attempt 4 to park on the real upstream queue, then publish the real event.
+        let proceed_attempt_4 = tokio::select! {
+            maybe_attempt = attempt_rx.recv() => {
+                let (seen, tx) = maybe_attempt.expect("proxy attempt 4 missing");
+                assert_eq!(seen, 4, "{kind}: expected attempt 4");
+                tx
+            }
+            early_exit = &mut exit_task => {
+                let out = early_exit.unwrap();
+                panic!(
+                    "{kind} waiter exited on proxy SSE drain instead of reconnecting to attempt 4: status={:?} stdout={} stderr={}",
+                    out.status.code(),
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr),
+                );
+            }
+        };
+        assert_eq!(*activity.wait_for(|count| *count == 1).await.unwrap(), 1);
+        let listed = client
+            .call_tool(
+                CallToolRequestParams::new("subscription").with_arguments(
+                    json!({"action":"list","stream":"orders"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            listed.structured_content.unwrap()["subscriptions"][0]["waiting"],
+            true,
+            "{kind}: subscription must remain waiting=true after transparent SSE reconnect"
+        );
+
+        let _ = proceed_attempt_4.send(());
+        client
+            .call_tool(
+                CallToolRequestParams::new("publish").with_arguments(
+                    json!({"stream":"orders","idempotency_key":format!("{kind}-wake"),"payload":format!("delivered-{kind}")})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .unwrap();
+
+        let output = exit_task.await.unwrap();
+        proxy_task.await.unwrap();
+        assert!(output.status.success(), "{kind}: {output:?}");
+        assert!(output.stderr.is_empty(), "{kind}: {output:?}");
+        let delivered: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(delivered["status"], "events");
+        assert_eq!(
+            delivered["events"][0]["payload"],
+            format!("delivered-{kind}")
+        );
+        assert_eq!(delivered["ack_result"]["batch_id"], seed_batch_id);
+        assert_eq!(delivered["ack_result"]["outcome"], "already_acked");
+
+        // Negative guard: if an SSE stream emits `: keepalive\n\n` AND starts a `data:` frame
+        // before dropping mid-stream, NEITHER waiter may swallow the truncated event frame;
+        // it must fail terminal exit 7 (`transport_failed`) on attempt 1 without reconnecting.
+        let mut truncated_after_keepalive =
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                .to_vec();
+        truncated_after_keepalive.extend_from_slice(&http_chunk(b": keepalive\n\n"));
+        truncated_after_keepalive.extend_from_slice(b"10\r\ndata: {");
+        let mut bad_server = HttpServer::start(truncated_after_keepalive);
+        let mut bad_cmd = if kind == "rust" {
+            command(dir.path())
+        } else {
+            python_waiter_command(dir.path())
+        };
+        let bad_out = bad_cmd
+            .args(["--url", &bad_server.url, "--handle", &handle])
+            .output()
+            .unwrap();
+        terminal(&bad_out, 7, "transport_failed");
+        assert_eq!(
+            bad_server.finish().len(),
+            1,
+            "{kind}: truncated data: frame after keepalive must not reconnect"
+        );
+
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+}
