@@ -437,7 +437,7 @@ INDEX_HTML = """<!DOCTYPE html>
       --border-grid: #1E3A8A;
       --border-subtle: rgba(59, 130, 246, 0.22);
       --text-primary: #E8F0FE;
-      --text-muted: #8BA3C7;
+      --text-muted: #BBCBE3;
       --accent-amber: #F59E0B;
       --accent-amber-soft: rgba(245, 158, 11, 0.14);
       --accent-seafoam: #5EEAD4;
@@ -464,7 +464,8 @@ INDEX_HTML = """<!DOCTYPE html>
       background-size: auto, 32px 32px, 32px 32px;
       color: var(--text-primary);
       font-family: var(--font-body);
-      line-height: 1.55;
+      font-size: 1.125rem;
+      line-height: 1.65;
       min-height: 100vh;
       -webkit-font-smoothing: antialiased;
     }
@@ -478,7 +479,7 @@ INDEX_HTML = """<!DOCTYPE html>
     }
 
     .shell {
-      max-width: 1240px;
+      max-width: 1480px;
       margin: 0 auto;
       padding: 24px 24px 64px;
     }
@@ -519,7 +520,7 @@ INDEX_HTML = """<!DOCTYPE html>
 
     .brand-sub {
       font-family: var(--font-mono);
-      font-size: 0.74rem;
+      font-size: 0.875rem;
       color: var(--text-muted);
       text-transform: uppercase;
       letter-spacing: 0.08em;
@@ -531,7 +532,7 @@ INDEX_HTML = """<!DOCTYPE html>
       align-items: center;
       gap: 18px;
       font-family: var(--font-mono);
-      font-size: 0.78rem;
+      font-size: 0.875rem;
       font-variant-numeric: tabular-nums;
       color: var(--text-muted);
     }
@@ -562,12 +563,16 @@ INDEX_HTML = """<!DOCTYPE html>
     /* Main Asymmetric Dispatch Console */
     .console-grid {
       display: grid;
-      grid-template-columns: 5fr 7fr;
+      grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
       gap: 28px;
       align-items: start;
     }
 
-    @media (max-width: 960px) {
+    .console-grid > * {
+      min-width: 0;
+    }
+
+    @media (max-width: 1100px) {
       .console-grid {
         grid-template-columns: 1fr;
       }
@@ -585,7 +590,7 @@ INDEX_HTML = """<!DOCTYPE html>
       align-items: center;
       gap: 8px;
       font-family: var(--font-mono);
-      font-size: 0.76rem;
+      font-size: 0.875rem;
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.1em;
@@ -602,7 +607,7 @@ INDEX_HTML = """<!DOCTYPE html>
     }
 
     .lead {
-      font-size: 1.02rem;
+      font-size: 1.125rem;
       color: var(--text-muted);
       max-width: 54ch;
     }
@@ -654,6 +659,7 @@ INDEX_HTML = """<!DOCTYPE html>
 
     .cli-mint-bar {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
       justify-content: space-between;
       gap: 10px;
@@ -662,14 +668,17 @@ INDEX_HTML = """<!DOCTYPE html>
       border-radius: 6px;
       padding: 9px 12px;
       font-family: var(--font-mono);
-      font-size: 0.78rem;
+      font-size: 1rem;
       color: var(--text-muted);
       overflow-x: auto;
     }
 
     .cli-mint-bar code {
       color: var(--accent-seafoam);
-      white-space: nowrap;
+      flex: 1 1 100%;
+      min-width: 0;
+      max-width: 100%;
+      overflow-wrap: anywhere;
     }
 
     .copy-mini {
@@ -677,8 +686,8 @@ INDEX_HTML = """<!DOCTYPE html>
       border: 1px solid var(--border-subtle);
       color: var(--text-primary);
       font-family: var(--font-mono);
-      font-size: 0.72rem;
-      padding: 4px 8px;
+      font-size: 0.9375rem;
+      padding: 8px 12px;
       border-radius: 4px;
       cursor: pointer;
       flex-shrink: 0;
@@ -699,7 +708,7 @@ INDEX_HTML = """<!DOCTYPE html>
 
     .spec-title {
       font-family: var(--font-mono);
-      font-size: 0.75rem;
+      font-size: 1rem;
       text-transform: uppercase;
       letter-spacing: 0.08em;
       color: var(--text-muted);
@@ -710,7 +719,7 @@ INDEX_HTML = """<!DOCTYPE html>
       list-style: none;
       display: grid;
       gap: 10px;
-      font-size: 0.9rem;
+      font-size: 1rem;
       color: var(--text-muted);
     }
 
@@ -722,7 +731,7 @@ INDEX_HTML = """<!DOCTYPE html>
 
     .spec-tag {
       font-family: var(--font-mono);
-      font-size: 0.74rem;
+      font-size: 0.875rem;
       color: var(--accent-seafoam);
       background: var(--accent-seafoam-soft);
       padding: 2px 6px;
@@ -752,13 +761,14 @@ INDEX_HTML = """<!DOCTYPE html>
 
     .ticket-title-group {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
       gap: 10px;
     }
 
     .ticket-badge {
       font-family: var(--font-mono);
-      font-size: 0.72rem;
+      font-size: 0.875rem;
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.08em;
@@ -779,11 +789,12 @@ INDEX_HTML = """<!DOCTYPE html>
       font-size: 1.2rem;
       font-weight: 700;
       letter-spacing: -0.02em;
+      overflow-wrap: anywhere;
     }
 
     .ticket-ttl {
       font-family: var(--font-mono);
-      font-size: 0.82rem;
+      font-size: 1rem;
       font-variant-numeric: tabular-nums;
       color: var(--accent-amber);
     }
@@ -798,8 +809,12 @@ INDEX_HTML = """<!DOCTYPE html>
     /* Credential Stamp Grid */
     .stamp-grid {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 12px;
+    }
+
+    .stamp-cell:last-child {
+      grid-column: 1 / -1;
     }
 
     @media (max-width: 640px) {
@@ -817,7 +832,7 @@ INDEX_HTML = """<!DOCTYPE html>
 
     .stamp-label {
       font-family: var(--font-mono);
-      font-size: 0.68rem;
+      font-size: 0.875rem;
       text-transform: uppercase;
       letter-spacing: 0.08em;
       color: var(--text-muted);
@@ -826,10 +841,10 @@ INDEX_HTML = """<!DOCTYPE html>
 
     .stamp-value {
       font-family: var(--font-mono);
-      font-size: 0.86rem;
+      font-size: 1rem;
       font-weight: 600;
       color: var(--text-primary);
-      word-break: break-all;
+      overflow-wrap: anywhere;
     }
 
     .stamp-value.amber {
@@ -854,7 +869,7 @@ INDEX_HTML = """<!DOCTYPE html>
 
     .token-value {
       font-family: var(--font-mono);
-      font-size: 0.84rem;
+      font-size: 1rem;
       color: var(--accent-amber);
       overflow-x: auto;
       white-space: nowrap;
@@ -874,7 +889,7 @@ INDEX_HTML = """<!DOCTYPE html>
       border: 1px solid var(--border-subtle);
       color: var(--text-muted);
       font-family: var(--font-mono);
-      font-size: 0.76rem;
+      font-size: 1rem;
       font-weight: 600;
       padding: 7px 12px;
       border-radius: 6px;
@@ -889,16 +904,17 @@ INDEX_HTML = """<!DOCTYPE html>
 
     .code-box {
       position: relative;
+      min-width: 0;
       background: var(--bg-well);
       border: 1px solid var(--border-subtle);
       border-radius: 8px;
-      padding: 14px;
+      padding: 60px 16px 16px;
     }
 
     .code-box pre {
       font-family: var(--font-mono);
-      font-size: 0.78rem;
-      line-height: 1.5;
+      font-size: 1rem;
+      line-height: 1.65;
       color: var(--text-primary);
       overflow-x: auto;
       white-space: pre;
@@ -912,8 +928,8 @@ INDEX_HTML = """<!DOCTYPE html>
       border: 1px solid var(--border-grid);
       color: var(--text-primary);
       font-family: var(--font-mono);
-      font-size: 0.72rem;
-      padding: 5px 10px;
+      font-size: 0.9375rem;
+      padding: 8px 12px;
       border-radius: 5px;
       cursor: pointer;
     }
@@ -926,7 +942,7 @@ INDEX_HTML = """<!DOCTYPE html>
     /* Two-Terminal Handshake Prompt */
     .handshake-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: minmax(0, 1fr);
       gap: 12px;
     }
 
@@ -951,17 +967,17 @@ INDEX_HTML = """<!DOCTYPE html>
       align-items: center;
       justify-content: space-between;
       font-family: var(--font-mono);
-      font-size: 0.72rem;
+      font-size: 0.9375rem;
       color: var(--accent-seafoam);
       text-transform: uppercase;
       letter-spacing: 0.06em;
     }
 
     .terminal-prompt {
-      font-family: var(--font-mono);
-      font-size: 0.76rem;
+      font-family: var(--font-body);
+      font-size: 1.0625rem;
       color: var(--text-primary);
-      line-height: 1.45;
+      line-height: 1.65;
     }
 
     /* Live Bus Probe Bar */
@@ -985,7 +1001,7 @@ INDEX_HTML = """<!DOCTYPE html>
       border: 1px solid var(--accent-seafoam);
       color: var(--accent-seafoam);
       font-family: var(--font-mono);
-      font-size: 0.78rem;
+      font-size: 1rem;
       font-weight: 600;
       padding: 8px 13px;
       border-radius: 6px;
@@ -1003,7 +1019,7 @@ INDEX_HTML = """<!DOCTYPE html>
 
     .probe-output {
       font-family: var(--font-mono);
-      font-size: 0.76rem;
+      font-size: 1rem;
       background: var(--bg-well);
       border: 1px solid var(--border-subtle);
       border-radius: 6px;
@@ -1021,13 +1037,13 @@ INDEX_HTML = """<!DOCTYPE html>
       color: #FCA5A5;
       padding: 10px 14px;
       border-radius: 8px;
-      font-size: 0.85rem;
+      font-size: 1rem;
     }
 
     .helper-downloads {
       width: 100%;
       border-collapse: collapse;
-      font-size: 0.84rem;
+      font-size: 1rem;
     }
 
     .helper-downloads th, .helper-downloads td {
@@ -1037,9 +1053,34 @@ INDEX_HTML = """<!DOCTYPE html>
     }
 
     .helper-note {
-      font-size: 0.82rem;
+      font-size: 1rem;
       color: var(--text-muted);
       margin-top: 12px;
+    }
+
+    :focus-visible {
+      outline: 3px solid var(--accent-amber);
+      outline-offset: 3px;
+    }
+
+    @media (max-width: 640px) {
+      .shell {
+        padding: 16px 12px 40px;
+      }
+
+      .ticket-body, .ticket-header, .spec-panel, .mint-action-box {
+        padding: 16px;
+      }
+
+      .spec-list li {
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .terminal-head {
+        flex-wrap: wrap;
+        gap: 8px;
+      }
     }
   </style>
 </head>
