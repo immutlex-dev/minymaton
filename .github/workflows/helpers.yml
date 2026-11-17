@@ -1,0 +1,65 @@
+name: Native trial helpers
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published minymaton-server version
+        required: true
+        default: "0.1.6"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install native Rust toolchain
+        shell: python
+        run: |
+          import subprocess
+          subprocess.run(["rustup", "toolchain", "install", "1.98.0", "--profile", "minimal"], check=True)
+      - name: Compile and run native waiter
+        env:
+          RUSTUP_TOOLCHAIN: "1.98.0"
+          HELPER_VERSION: ${{ inputs.version }}
+          HELPER_TARGET: ${{ matrix.target }}
+        shell: python
+        run: |
+          import os
+          import subprocess
+          subprocess.run([
+              "python", "tools/build_waiter.py",
+              "--version", os.environ["HELPER_VERSION"],
+              "--target", os.environ["HELPER_TARGET"],
+              "--out-dir", "dist",
+          ], check=True)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: minymaton-wait-${{ matrix.target }}
+          path: dist/minymaton-wait-*
+          if-no-files-found: error
+          retention-days: 7
