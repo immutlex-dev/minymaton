@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::CoreError;
 use crate::mcp_client::Endpoint;
-use crate::storage::{Joined, Profile, Storage, StoredMessage};
+use crate::storage::{Joined, MAX_MESSAGE_PAGE_LIMIT, Profile, Storage, StoredMessage};
 
 /// Receives each event as JSON, on a core thread.
 pub type Listener = Box<dyn Fn(String) + Send + Sync>;
@@ -33,6 +33,8 @@ pub type Listener = Box<dyn Fn(String) + Send + Sync>;
 const MAX_EVENTS: u64 = 16;
 const MAX_BYTES: u64 = 16_384;
 const PAGE_LIMIT: u64 = 100;
+const DEFAULT_STREAM_PAGE_LIMIT: u64 = 20;
+const DEFAULT_MESSAGE_PAGE_LIMIT: u32 = 20;
 const NUDGE_SOURCE: &str = "minymaton-mobile";
 
 #[derive(Deserialize)]
@@ -53,7 +55,10 @@ enum Command {
     },
     Deactivate,
     Status,
-    Streams,
+    Streams {
+        after: Option<String>,
+        limit: Option<u64>,
+    },
     CreateStream {
         name: String,
     },
@@ -97,10 +102,13 @@ enum Command {
     },
     Messages {
         stream: String,
+        before: Option<u64>,
         limit: Option<u32>,
     },
     SyncHistory {
         stream: String,
+        before: Option<u64>,
+        limit: Option<u32>,
     },
     Pause,
     Resume,
@@ -261,9 +269,12 @@ impl MobileCore {
                     "watching": watching,
                 }))
             }
-            Command::Streams => {
+            Command::Streams { after, limit } => {
                 let (_, endpoint) = self.active()?;
-                Ok(json!({"streams": list_streams(&endpoint).await?}))
+                let (streams, next_after) =
+                    list_streams_page(&endpoint, after.as_deref(), clamp_stream_limit(limit))
+                        .await?;
+                Ok(json!({"streams": streams, "next_after": next_after}))
             }
             Command::CreateStream { name } => {
                 let (_, endpoint) = self.active()?;
@@ -333,14 +344,19 @@ impl MobileCore {
                 let payload = json!({"nudge": kind, "text": text, "source": NUDGE_SOURCE});
                 self.publish(stream, payload, to).await
             }
-            Command::Messages { stream, limit } => {
+            Command::Messages {
+                stream,
+                before,
+                limit,
+            } => {
                 let (profile_id, _) = self.active()?;
-                Ok(json!({
-                    "stream": stream,
-                    "messages": storage.messages(&profile_id, &stream, limit.unwrap_or(200))?,
-                }))
+                messages_response(storage, &profile_id, &stream, before, limit)
             }
-            Command::SyncHistory { stream } => self.sync_history(stream).await,
+            Command::SyncHistory {
+                stream,
+                before,
+                limit,
+            } => self.sync_history(stream, before, limit).await,
             Command::Pause => {
                 *self
                     .shared
@@ -406,7 +422,8 @@ impl MobileCore {
             profile.ca_pem.as_deref(),
         )?);
         // Proves the URL, the trust store and the token before switching.
-        let streams = list_streams(&endpoint).await?;
+        let (streams, next_after) =
+            list_streams_page(&endpoint, None, DEFAULT_STREAM_PAGE_LIMIT).await?;
         stop_watchers(self.shared.lock_active().replace(Active {
             profile_id: profile.id.clone(),
             endpoint,
@@ -414,7 +431,12 @@ impl MobileCore {
         }));
         storage.set_active_profile(Some(&profile.id))?;
         let started = self.start_watchers()?;
-        Ok(json!({"profile": profile, "streams": streams, "started": started}))
+        Ok(json!({
+            "profile": profile,
+            "streams": streams,
+            "next_after": next_after,
+            "started": started,
+        }))
     }
 
     async fn join(
@@ -502,12 +524,14 @@ impl MobileCore {
             }
         }
         self.shared.storage.remove_streams(&profile_id, &deleted)?;
-        let updated = list_streams(&endpoint).await?;
+        let (updated, next_after) =
+            list_streams_page(&endpoint, None, DEFAULT_STREAM_PAGE_LIMIT).await?;
         Ok(json!({
             "status": status,
             "deleted": deleted,
             "deleted_count": deleted_count,
             "streams": updated,
+            "next_after": next_after,
         }))
     }
 
@@ -544,12 +568,14 @@ impl MobileCore {
             }
         }
         self.shared.storage.remove_streams(&profile_id, &deleted)?;
-        let updated = list_streams(&endpoint).await?;
+        let (updated, next_after) =
+            list_streams_page(&endpoint, None, DEFAULT_STREAM_PAGE_LIMIT).await?;
         Ok(json!({
             "status": "swept",
             "deleted": deleted,
             "deleted_count": deleted_count,
             "streams": updated,
+            "next_after": next_after,
         }))
     }
 
@@ -671,7 +697,12 @@ impl MobileCore {
     /// Loads the stream's retained history into local storage through a
     /// temporary subscription started at the earliest retained message,
     /// then deletes that subscription so the roster is left as it was.
-    async fn sync_history(&self, stream: String) -> Result<Value, CoreError> {
+    async fn sync_history(
+        &self,
+        stream: String,
+        before: Option<u64>,
+        limit: Option<u32>,
+    ) -> Result<Value, CoreError> {
         let (profile_id, endpoint) = self.active()?;
         let created = endpoint
             .call(
@@ -700,10 +731,7 @@ impl MobileCore {
             .await;
         loaded?;
         deleted?;
-        Ok(json!({
-            "stream": stream,
-            "messages": self.shared.storage.messages(&profile_id, &stream, 200)?,
-        }))
+        messages_response(&self.shared.storage, &profile_id, &stream, before, limit)
     }
 
     async fn drain_history(
@@ -1055,27 +1083,52 @@ async fn list_roster(
     }
 }
 
-async fn list_streams(endpoint: &Endpoint) -> Result<Vec<String>, CoreError> {
-    let mut streams = Vec::new();
-    let mut after: Option<String> = None;
-    loop {
-        let mut arguments = json!({"action": "list", "limit": PAGE_LIMIT});
-        if let Some(after) = &after {
-            arguments["after"] = json!(after);
-        }
-        let StreamResult::Listed {
-            streams: page,
-            next_after,
-        } = decode(endpoint.call("stream", arguments).await?)?
-        else {
-            return Err(CoreError::protocol("stream list returned no list"));
-        };
-        streams.extend(page);
-        match next_after {
-            Some(next) => after = Some(next),
-            None => return Ok(streams),
-        }
+fn clamp_stream_limit(limit: Option<u64>) -> u64 {
+    limit
+        .unwrap_or(DEFAULT_STREAM_PAGE_LIMIT)
+        .clamp(1, PAGE_LIMIT)
+}
+
+fn clamp_message_limit(limit: Option<u32>) -> u32 {
+    limit
+        .unwrap_or(DEFAULT_MESSAGE_PAGE_LIMIT)
+        .clamp(1, MAX_MESSAGE_PAGE_LIMIT)
+}
+
+fn messages_response(
+    storage: &Storage,
+    profile_id: &str,
+    stream: &str,
+    before: Option<u64>,
+    limit: Option<u32>,
+) -> Result<Value, CoreError> {
+    let page = storage.messages_page(profile_id, stream, before, clamp_message_limit(limit))?;
+    Ok(json!({
+        "stream": stream,
+        "messages": page.messages,
+        "next_before": page.next_before,
+        "has_newer": page.has_newer,
+        "total_retained": page.total_retained,
+    }))
+}
+
+async fn list_streams_page(
+    endpoint: &Endpoint,
+    after: Option<&str>,
+    limit: u64,
+) -> Result<(Vec<String>, Option<String>), CoreError> {
+    let mut arguments = json!({"action": "list", "limit": limit});
+    if let Some(after) = after {
+        arguments["after"] = json!(after);
     }
+    let StreamResult::Listed {
+        streams,
+        next_after,
+    } = decode(endpoint.call("stream", arguments).await?)?
+    else {
+        return Err(CoreError::protocol("stream list returned no list"));
+    };
+    Ok((streams, next_after))
 }
 
 fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, CoreError> {

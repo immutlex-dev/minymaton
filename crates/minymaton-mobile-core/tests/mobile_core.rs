@@ -262,9 +262,12 @@ fn sync_history_loads_messages_published_before_joining_and_leaves_no_subscripti
     let synced = phone.request(json!({"cmd": "sync_history", "stream": "ops"}));
     let messages = synced["messages"].as_array().expect("synced messages");
     assert_eq!(messages.len(), 2, "{synced}");
-    assert_eq!(messages[0]["message_id"], first["message_id"], "{synced}");
-    assert_eq!(messages[1]["message_id"], second["message_id"], "{synced}");
-    assert_eq!(messages[0]["payload"]["text"], "before one", "{synced}");
+    assert_eq!(messages[0]["message_id"], second["message_id"], "{synced}");
+    assert_eq!(messages[1]["message_id"], first["message_id"], "{synced}");
+    assert_eq!(messages[1]["payload"]["text"], "before one", "{synced}");
+    assert_eq!(synced["total_retained"], 2, "{synced}");
+    assert_eq!(synced["next_before"], Value::Null, "{synced}");
+    assert_eq!(synced["has_newer"], false, "{synced}");
 
     // The temporary history subscription is gone: only the desk remains.
     let roster = phone.request(json!({"cmd": "roster", "stream": "ops"}));
@@ -424,7 +427,7 @@ fn a_direct_message_wakes_the_phone_is_stored_then_acknowledged_and_answered() {
     );
 
     // The phone's own broadcasts are not echoed back to it; its history
-    // holds the incoming message and the three it sent, in order.
+    // returns newest first (the three sent, then the incoming message).
     let history = phone.request(json!({"cmd": "messages", "stream": "ops"}));
     let directions: Vec<&str> = history["messages"]
         .as_array()
@@ -432,7 +435,7 @@ fn a_direct_message_wakes_the_phone_is_stored_then_acknowledged_and_answered() {
         .iter()
         .map(|message| message["direction"].as_str().expect("direction"))
         .collect();
-    assert_eq!(directions, ["in", "out", "out", "out"], "{history}");
+    assert_eq!(directions, ["out", "out", "out", "in"], "{history}");
 
     let error = phone
         .try_request(json!({"cmd": "nudge", "stream": "ops", "kind": "custom", "text": "   "}))
@@ -596,7 +599,7 @@ fn a_cold_restart_keeps_profiles_history_and_the_owed_subscription() {
         .iter()
         .map(|message| &message["message_id"])
         .collect();
-    assert_eq!(stored, [&first["message_id"], &second["message_id"]]);
+    assert_eq!(stored, [&second["message_id"], &first["message_id"]]);
 }
 
 #[test]
@@ -769,4 +772,99 @@ fn sweeps_and_bulk_deletes_idle_streams_and_subscriptions() {
     assert_eq!(joined_after["subscriptions"], json!([]));
     let msgs_after = phone.request(json!({"cmd": "messages", "stream": "ops"}));
     assert_eq!(msgs_after["messages"], json!([]));
+    assert_eq!(msgs_after["total_retained"], 0);
+}
+
+#[test]
+fn paginates_streams_and_messages_with_cursors() {
+    let bus = Bus::start();
+    let desk = bus.desk();
+    let device = tempfile::tempdir().unwrap();
+    let phone = Phone::open(device.path());
+    let profile = phone.add_profile("local", &bus.url, None);
+    phone.activate(&profile);
+
+    for idx in 1..=24 {
+        create_stream(&phone, &format!("chan-{idx:02}"));
+    }
+
+    let default_page = phone.request(json!({"cmd": "streams"}));
+    let default_names: Vec<String> = default_page["streams"]
+        .as_array()
+        .expect("default streams page")
+        .iter()
+        .map(|entry| entry.as_str().expect("stream name").to_owned())
+        .collect();
+    assert_eq!(default_names.len(), 20, "{default_page}");
+    assert_eq!(default_names[0], "agents");
+    assert_eq!(default_names[19], "chan-19");
+    assert_eq!(default_page["next_after"], "chan-19", "{default_page}");
+
+    let mut walked_streams = Vec::new();
+    let mut after: Option<String> = None;
+    let mut page_sizes = Vec::new();
+    loop {
+        let mut command = json!({"cmd": "streams", "limit": 10});
+        if let Some(cursor) = &after {
+            command["after"] = json!(cursor);
+        }
+        let page = phone.request(command);
+        let items: Vec<String> = page["streams"]
+            .as_array()
+            .expect("streams page")
+            .iter()
+            .map(|entry| entry.as_str().expect("stream name").to_owned())
+            .collect();
+        page_sizes.push(items.len());
+        walked_streams.extend(items);
+        match page["next_after"].as_str() {
+            Some(next) => after = Some(next.to_owned()),
+            None => break,
+        }
+    }
+    assert_eq!(page_sizes, vec![10, 10, 5]);
+    let mut expected_streams = vec!["agents".to_owned()];
+    expected_streams.extend((1..=24).map(|idx| format!("chan-{idx:02}")));
+    assert_eq!(walked_streams, expected_streams);
+
+    desk.join("chan-01");
+    for n in 1..=215 {
+        desk.publish("chan-01", json!({"n": n}), None);
+    }
+
+    let first_sync = phone.request(json!({"cmd": "sync_history", "stream": "chan-01"}));
+    assert_eq!(first_sync["total_retained"], 215, "{first_sync}");
+    assert_eq!(first_sync["has_newer"], false, "{first_sync}");
+    assert_eq!(first_sync["next_before"], 196, "{first_sync}");
+    let first_seqs: Vec<u64> = first_sync["messages"]
+        .as_array()
+        .expect("first message page")
+        .iter()
+        .map(|entry| entry["sequence"].as_u64().expect("seq"))
+        .collect();
+    assert_eq!(first_seqs, (196..=215).rev().collect::<Vec<u64>>());
+
+    let mut walked_seqs = Vec::new();
+    let mut before: Option<u64> = None;
+    loop {
+        let mut command = json!({"cmd": "messages", "stream": "chan-01", "limit": 50});
+        if let Some(cursor) = before {
+            command["before"] = json!(cursor);
+        }
+        let page = phone.request(command);
+        assert_eq!(page["total_retained"], 215);
+        assert_eq!(page["has_newer"], before.is_some());
+        let batch: Vec<u64> = page["messages"]
+            .as_array()
+            .expect("message page")
+            .iter()
+            .map(|entry| entry["sequence"].as_u64().expect("seq"))
+            .collect();
+        walked_seqs.extend(batch);
+        match page["next_before"].as_u64() {
+            Some(cursor) => before = Some(cursor),
+            None => break,
+        }
+    }
+    assert_eq!(walked_seqs, (1..=215).rev().collect::<Vec<u64>>());
 }

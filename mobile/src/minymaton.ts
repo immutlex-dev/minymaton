@@ -37,6 +37,19 @@ export type Message = {
 
 export type Joined = { stream: string; label: string };
 
+export type StreamsPage = {
+  streams: string[];
+  next_after: string | null;
+};
+
+export type MessagesPage = {
+  stream: string;
+  messages: Message[];
+  next_before: number | null;
+  has_newer: boolean;
+  total_retained: number;
+};
+
 export type NudgeKind = 'yes_go' | 'no_stop' | 'catch_up' | 'custom';
 
 export type CoreEvent =
@@ -66,17 +79,22 @@ export const core = {
     call<{ profile: Profile }>({ cmd: 'add_profile', name, url }),
   removeProfile: (profileId: string) => call({ cmd: 'remove_profile', profile_id: profileId }),
   activate: (profileId: string, token: string | null) =>
-    call<{ profile: Profile; streams: string[] }>(
+    call<{ profile: Profile; streams: string[]; next_after: string | null; started: string[] }>(
       token === null ? { cmd: 'activate', profile_id: profileId } : { cmd: 'activate', profile_id: profileId, token },
     ),
-  streams: () => call<{ streams: string[] }>({ cmd: 'streams' }),
+  streams: (opts?: { after?: string | null; limit?: number }) => {
+    const command: Record<string, unknown> = { cmd: 'streams' };
+    if (opts?.after) command.after = opts.after;
+    if (opts?.limit !== undefined) command.limit = opts.limit;
+    return call<StreamsPage>(command);
+  },
   deleteStreams: (streams: string[]) =>
-    call<{ status: string; deleted: string[]; deleted_count: number; streams: string[] }>({
+    call<{ status: string; deleted: string[]; deleted_count: number; streams: string[]; next_after: string | null }>({
       cmd: 'delete_streams',
       streams,
     }),
   sweepStreams: (keep?: string[]) =>
-    call<{ status: string; deleted: string[]; deleted_count: number; streams: string[] }>(
+    call<{ status: string; deleted: string[]; deleted_count: number; streams: string[]; next_after: string | null }>(
       keep ? { cmd: 'sweep_streams', keep } : { cmd: 'sweep_streams' },
     ),
   roster: (stream: string) => call<{ stream: string; subscriptions: RosterEntry[] }>({ cmd: 'roster', stream }),
@@ -101,8 +119,18 @@ export const core = {
     if (to) command.to = to;
     return call<{ message: Message }>(command);
   },
-  messages: (stream: string) => call<{ messages: Message[] }>({ cmd: 'messages', stream }),
-  syncHistory: (stream: string) => call<{ stream: string; messages: Message[] }>({ cmd: 'sync_history', stream }),
+  messages: (stream: string, opts?: { before?: number | null; limit?: number }) => {
+    const command: Record<string, unknown> = { cmd: 'messages', stream };
+    if (opts?.before !== undefined && opts?.before !== null) command.before = opts.before;
+    if (opts?.limit !== undefined) command.limit = opts.limit;
+    return call<MessagesPage>(command);
+  },
+  syncHistory: (stream: string, opts?: { before?: number | null; limit?: number }) => {
+    const command: Record<string, unknown> = { cmd: 'sync_history', stream };
+    if (opts?.before !== undefined && opts?.before !== null) command.before = opts.before;
+    if (opts?.limit !== undefined) command.limit = opts.limit;
+    return call<MessagesPage>(command);
+  },
   pause: () => call<{ paused: true; stopped: string[] }>({ cmd: 'pause' }),
   resume: () => call({ cmd: 'resume' }),
 };

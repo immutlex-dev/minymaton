@@ -566,19 +566,22 @@ console for Android and iOS backed by a shared Rust core
   `pending_ack` and issuing `receive(wait: true)` so queued backlog returns
   immediately before parking again.
   Opening an unjoined stream pulls retained server history via an ephemeral
-  reader subscription that deletes itself immediately.
-- **Dispatch deck & sweep controls:** Add any HTTPS-proxied `minymaton-server` `/mcp`
-  endpoint (including a 24-hour channel from
+  reader subscription that deletes itself immediately, storing every retained
+  message locally for indexed cursor pagination (`before`/`next_before`).
+- **Dispatch deck, cursor pagination, & sweep controls:** Add any HTTPS-proxied
+  `minymaton-server` `/mcp` endpoint (including a 24-hour channel from
   [`https://cp.scritty.dev/minymaton-try/`](https://cp.scritty.dev/minymaton-try/)),
-  switch between saved bus profiles, and open any stream to access the
-  top-docked `DISPATCH DECK` immediately above the roster and history. Inspect
-  `WAITING` / `IDLE` subscriptions (idle entries collapse after 8 with a
-  `SHOW +N IDLE` toggle while keeping the selected target and joined label
-  visible), tap a roster entry to route a direct message (`TARGET: @<label>`,
-  setting `to` + `payload.to`) or clear to broadcast, send one-tap nudges
-  (`YES / GO`, `NO / STOP`, `CATCH UP`, `NUDGE`) or typed messages, and clean up
-  idle agents or channels via state-driven `SWEEP IDLE` and multi-select bulk
-  `DELETE` controls.
+  switch between saved bus profiles, page through channels (`< PREV` / `NEXT >`
+  via server `after`/`next_after` cursors) and stream history (`< NEWER` /
+  `OLDER >` / `LATEST` via indexed `before`/`next_before` cursors), and open
+  any stream to access the top-docked `DISPATCH DECK` immediately above the
+  roster and history. Inspect `WAITING` / `IDLE` subscriptions (idle entries
+  collapse after 8 with a `SHOW +N IDLE` toggle while keeping the selected
+  target and joined label visible), tap a roster entry to route a direct
+  message (`TARGET: @<label>`, setting `to` + `payload.to`) or clear to
+  broadcast, send one-tap nudges (`YES / GO`, `NO / STOP`, `CATCH UP`, `NUDGE`)
+  or typed messages, and clean up idle agents or channels via state-driven
+  `SWEEP IDLE` and multi-select bulk `DELETE` controls.
 
 Build and run the mobile Detox integration suites:
 
@@ -743,7 +746,7 @@ spawn real loopback HTTP and custom-CA TLS `minymaton-server` instances to verif
 token rejection without secret echo, persist-before-ACK crash recovery,
 `@recipient` direct-routing isolation, retained history sync cleanup,
 background pause/resume catch-up, multi-bus isolation, state-driven sweep and bulk deletion,
-and custom-CA TLS. End-to-end Detox suites (`mobile/e2e/`) exercise flows `f1`–`f6` on
+channel/message cursor pagination, and custom-CA TLS. End-to-end Detox suites (`mobile/e2e/`) exercise flows `f1`–`f7` on
 Android and iOS against live loopback `minymaton-server` processes.
 
 ## Architecture

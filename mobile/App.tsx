@@ -16,6 +16,7 @@ import {
   core,
   CoreError,
   Message,
+  MessagesPage,
   messageText,
   NudgeKind,
   onCoreEvent,
@@ -38,6 +39,8 @@ const MONO = Platform.select({ ios: 'Menlo', android: 'monospace' }) as string;
 
 const BUS_ACCENTS = ['#2DD4BF', '#38BDF8', '#F59E0B'] as const;
 const COLLAPSED_IDLE_LIMIT = 8;
+const STREAM_PAGE_SIZE = 20;
+const MESSAGE_PAGE_SIZE = 20;
 
 function busAccent(profile: Profile | undefined): string {
   if (!profile) return BUS_ACCENTS[0];
@@ -75,11 +78,19 @@ export default function App() {
   const [token, setToken] = useState('');
   const [showAdd, setShowAdd] = useState(false);
   const [streams, setStreams] = useState<string[]>([]);
+  const [streamAfter, setStreamAfter] = useState<string | null>(null);
+  const [streamCursorStack, setStreamCursorStack] = useState<(string | null)[]>([]);
+  const [streamNextAfter, setStreamNextAfter] = useState<string | null>(null);
   const [stream, setStream] = useState<string | null>(null);
   const [roster, setRoster] = useState<RosterEntry[]>([]);
   const [joinedMap, setJoinedMap] = useState<Record<string, boolean>>({});
   const [joinedLabels, setJoinedLabels] = useState<Record<string, string>>({});
   const [messages, setMessages] = useState<Message[]>([]);
+  const [msgBefore, setMsgBefore] = useState<number | null>(null);
+  const [msgCursorStack, setMsgCursorStack] = useState<(number | null)[]>([]);
+  const [msgNextBefore, setMsgNextBefore] = useState<number | null>(null);
+  const [msgHasNewer, setMsgHasNewer] = useState(false);
+  const [msgTotalRetained, setMsgTotalRetained] = useState(0);
   const [joinLabel, setJoinLabel] = useState('phone');
   const [composeText, setComposeText] = useState('');
   const [composeTo, setComposeTo] = useState('');
@@ -93,6 +104,8 @@ export default function App() {
   const [showAllIdleRoster, setShowAllIdleRoster] = useState(false);
   const streamRef = useRef<string | null>(null);
   streamRef.current = stream;
+  const msgBeforeRef = useRef<number | null>(null);
+  msgBeforeRef.current = msgBefore;
 
   const guard = useCallback(async (work: () => Promise<void>, label = 'Working') => {
     setBusy(label);
@@ -106,12 +119,39 @@ export default function App() {
     }
   }, []);
 
-  const loadStream = useCallback(async (streamName: string) => {
-    const [listed, history] = await Promise.all([core.roster(streamName), core.messages(streamName)]);
-    if (streamRef.current !== streamName) return;
-    setRoster(listed.subscriptions);
-    setMessages(history.messages);
+  const applyStreamResetPage = useCallback((streamsList: string[], nextAfter: string | null) => {
+    setStreams(streamsList);
+    setStreamAfter(null);
+    setStreamCursorStack([]);
+    setStreamNextAfter(nextAfter);
   }, []);
+
+  const applyMessagesPage = useCallback((page: MessagesPage) => {
+    setMessages(page.messages);
+    setMsgNextBefore(page.next_before);
+    setMsgHasNewer(page.has_newer);
+    setMsgTotalRetained(page.total_retained);
+  }, []);
+
+  const resetMessagesCursor = useCallback(() => {
+    setMsgBefore(null);
+    msgBeforeRef.current = null;
+    setMsgCursorStack([]);
+  }, []);
+
+  const loadStream = useCallback(
+    async (streamName: string, cursorOverride?: number | null) => {
+      const cursor = cursorOverride !== undefined ? cursorOverride : msgBeforeRef.current;
+      const [listed, history] = await Promise.all([
+        core.roster(streamName),
+        core.messages(streamName, { before: cursor, limit: MESSAGE_PAGE_SIZE }),
+      ]);
+      if (streamRef.current !== streamName) return;
+      setRoster(listed.subscriptions);
+      applyMessagesPage(history);
+    },
+    [applyMessagesPage],
+  );
 
   const refreshJoined = useCallback(async () => {
     const joined = await core.joined();
@@ -131,26 +171,30 @@ export default function App() {
     streamRef.current = null;
     setRoster([]);
     setMessages([]);
+    resetMessagesCursor();
+    setMsgNextBefore(null);
+    setMsgHasNewer(false);
+    setMsgTotalRetained(0);
     setComposeTo('');
     setWatchStatus('idle');
     setAckStatus('none');
     setSelectingRoster(false);
     setSelectedRoster([]);
     setShowAllIdleRoster(false);
-  }, []);
+  }, [resetMessagesCursor]);
 
   const activate = useCallback(
     async (profileId: string, secret: string | null) => {
       const result = await core.activate(profileId, secret);
       setActiveId(result.profile.id);
-      setStreams(result.streams);
+      applyStreamResetPage(result.streams, result.next_after);
       setSelectingStreams(false);
       setSelectedStreams([]);
       resetStream();
       setShowAdd(false);
       await refreshJoined();
     },
-    [refreshJoined, resetStream],
+    [applyStreamResetPage, refreshJoined, resetStream],
   );
 
   const reloadProfiles = useCallback(async () => {
@@ -238,11 +282,12 @@ export default function App() {
         setSelectedRoster([]);
         setShowAllIdleRoster(false);
       }
+      resetMessagesCursor();
       setStream(streamName);
       streamRef.current = streamName;
       const [listed, existing, joinedList] = await Promise.all([
         core.roster(streamName),
-        core.messages(streamName),
+        core.messages(streamName, { limit: MESSAGE_PAGE_SIZE }),
         core.joined(),
       ]);
       if (streamRef.current !== streamName) return;
@@ -257,21 +302,23 @@ export default function App() {
       setRoster(listed.subscriptions);
       // A stream the phone has not joined has no local history yet: pull
       // the bus's retained history once so tapping it is never empty.
-      if (existing.messages.length === 0 && !map[streamName]) {
-        const synced = await core.syncHistory(streamName);
+      if (existing.total_retained === 0 && !map[streamName]) {
+        const synced = await core.syncHistory(streamName, { limit: MESSAGE_PAGE_SIZE });
         if (streamRef.current !== streamName) return;
-        setMessages(synced.messages);
+        applyMessagesPage(synced);
       } else {
-        setMessages(existing.messages);
+        applyMessagesPage(existing);
       }
     });
 
   const syncHistory = () =>
     guard(async () => {
       if (!stream) return;
-      const synced = await core.syncHistory(stream);
-      setMessages(synced.messages);
-      await loadStream(stream);
+      resetMessagesCursor();
+      const synced = await core.syncHistory(stream, { limit: MESSAGE_PAGE_SIZE });
+      if (streamRef.current !== stream) return;
+      applyMessagesPage(synced);
+      await loadStream(stream, null);
     });
 
   const join = () =>
@@ -293,7 +340,8 @@ export default function App() {
       const recipient = cleanTarget(composeTo) || null;
       await core.publish(stream, { text }, recipient);
       setComposeText('');
-      await loadStream(stream);
+      resetMessagesCursor();
+      await loadStream(stream, null);
     });
 
   const nudge = (kind: NudgeKind) =>
@@ -301,16 +349,96 @@ export default function App() {
       if (!stream) return;
       await core.nudge(stream, kind, kind === 'custom' ? composeText : null, cleanTarget(composeTo) || null);
       if (kind === 'custom') setComposeText('');
-      await loadStream(stream);
+      resetMessagesCursor();
+      await loadStream(stream, null);
     });
+
+  const refreshStreams = () =>
+    guard(async () => {
+      const page = await core.streams({ limit: STREAM_PAGE_SIZE });
+      applyStreamResetPage(page.streams, page.next_after);
+    });
+
+  const nextStreamsPage = () => {
+    if (!streamNextAfter) return;
+    const nextCursor = streamNextAfter;
+    return guard(async () => {
+      const page = await core.streams({ after: nextCursor, limit: STREAM_PAGE_SIZE });
+      setStreamCursorStack((prev) => [...prev, streamAfter]);
+      setStreamAfter(nextCursor);
+      setStreams(page.streams);
+      setStreamNextAfter(page.next_after);
+    });
+  };
+
+  const prevStreamsPage = () => {
+    if (streamAfter === null) return;
+    const prevStack = streamCursorStack.slice(0, -1);
+    const prevCursor = streamCursorStack.length > 0 ? streamCursorStack[streamCursorStack.length - 1] : null;
+    return guard(async () => {
+      const page = await core.streams({ after: prevCursor, limit: STREAM_PAGE_SIZE });
+      setStreamCursorStack(prevStack);
+      setStreamAfter(prevCursor);
+      setStreams(page.streams);
+      setStreamNextAfter(page.next_after);
+    });
+  };
+
+  const firstStreamsPage = () => {
+    if (streamAfter === null) return;
+    return guard(async () => {
+      const page = await core.streams({ limit: STREAM_PAGE_SIZE });
+      applyStreamResetPage(page.streams, page.next_after);
+    });
+  };
+
+  const olderMessagesPage = () => {
+    if (!stream || msgNextBefore === null) return;
+    const targetStream = stream;
+    const nextCursor = msgNextBefore;
+    return guard(async () => {
+      const page = await core.messages(targetStream, { before: nextCursor, limit: MESSAGE_PAGE_SIZE });
+      if (streamRef.current !== targetStream) return;
+      setMsgCursorStack((prev) => [...prev, msgBefore]);
+      setMsgBefore(nextCursor);
+      msgBeforeRef.current = nextCursor;
+      applyMessagesPage(page);
+    });
+  };
+
+  const newerMessagesPage = () => {
+    if (!stream || (msgBefore === null && !msgHasNewer)) return;
+    const targetStream = stream;
+    const prevStack = msgCursorStack.slice(0, -1);
+    const prevCursor = msgCursorStack.length > 0 ? msgCursorStack[msgCursorStack.length - 1] : null;
+    return guard(async () => {
+      const page = await core.messages(targetStream, { before: prevCursor, limit: MESSAGE_PAGE_SIZE });
+      if (streamRef.current !== targetStream) return;
+      setMsgCursorStack(prevStack);
+      setMsgBefore(prevCursor);
+      msgBeforeRef.current = prevCursor;
+      applyMessagesPage(page);
+    });
+  };
+
+  const latestMessagesPage = () => {
+    if (!stream || msgBefore === null) return;
+    const targetStream = stream;
+    return guard(async () => {
+      const page = await core.messages(targetStream, { limit: MESSAGE_PAGE_SIZE });
+      if (streamRef.current !== targetStream) return;
+      resetMessagesCursor();
+      applyMessagesPage(page);
+    });
+  };
 
   const sweepStreams = () =>
     guard(async () => {
       const res = await core.sweepStreams();
-      setStreams(res.streams);
+      applyStreamResetPage(res.streams, res.next_after);
       setSelectedStreams([]);
       setSelectingStreams(false);
-      if (stream && (res.deleted.includes(stream) || !res.streams.includes(stream))) {
+      if (stream && res.deleted.includes(stream)) {
         resetStream();
       }
     });
@@ -319,11 +447,11 @@ export default function App() {
     guard(async () => {
       if (selectedStreams.length === 0) return;
       const res = await core.deleteStreams(selectedStreams);
-      setStreams(res.streams);
+      applyStreamResetPage(res.streams, res.next_after);
       await refreshJoined();
       setSelectedStreams([]);
       setSelectingStreams(false);
-      if (stream && (res.deleted.includes(stream) || !res.streams.includes(stream))) {
+      if (stream && res.deleted.includes(stream)) {
         resetStream();
       }
     });
@@ -396,7 +524,7 @@ export default function App() {
           <View style={styles.railRow}>
             <Pressable
               testID="refresh_streams"
-              onPress={() => guard(async () => setStreams((await core.streams()).streams))}
+              onPress={refreshStreams}
               android_ripple={{ color: accent }}
               style={({ pressed }) => [styles.actionBtn, { backgroundColor: `${accent}38`, borderColor: accent }, pressed && styles.actionBtnPressed]}
             >
@@ -628,11 +756,55 @@ export default function App() {
           <View style={styles.panel}>
             <View style={styles.panelHead}>
               <Text style={[styles.panelTitle, { color: accent }]}>{`HISTORY #${stream}`}</Text>
-              <Text style={styles.monoMuted}>{`${messages.length} retained`}</Text>
+              <Text testID="messages_page_info" style={styles.monoMuted}>
+                {msgTotalRetained === 0 ? '0 retained' : `Page ${msgCursorStack.length + 1} (${newestFirst.length}/${msgTotalRetained})`}
+              </Text>
               <Pressable testID="sync_history" onPress={syncHistory} android_ripple={{ color: accent }} style={({ pressed }) => [styles.miniBtn, { backgroundColor: `${accent}38`, borderColor: accent }, pressed && styles.actionBtnPressed]}>
                 <Text style={styles.miniBtnText}>{busy ? 'SYNCING...' : 'REPLAY HISTORY'}</Text>
               </Pressable>
             </View>
+            {msgBefore !== null || msgHasNewer || msgNextBefore !== null ? (
+              <View style={styles.pagerBar}>
+                {msgCursorStack.length > 1 ? (
+                  <Pressable testID="messages_latest" onPress={latestMessagesPage} android_ripple={{ color: accent }} style={({ pressed }) => [styles.miniBtn, { backgroundColor: `${accent}24`, borderColor: accent, marginLeft: 0 }, pressed && styles.actionBtnPressed]}>
+                    <Text style={[styles.miniBtnText, { color: accent }]}>LATEST</Text>
+                  </Pressable>
+                ) : null}
+                <Pressable
+                  testID="messages_newer"
+                  disabled={msgBefore === null && !msgHasNewer}
+                  onPress={newerMessagesPage}
+                  android_ripple={{ color: accent }}
+                  style={({ pressed }) => [
+                    styles.miniBtn,
+                    { marginLeft: 0 },
+                    msgBefore === null && !msgHasNewer ? styles.miniBtnDisabled : { backgroundColor: `${accent}24`, borderColor: accent },
+                    pressed && styles.actionBtnPressed,
+                  ]}
+                >
+                  <Text style={[styles.miniBtnText, msgBefore === null && !msgHasNewer ? styles.pagerTextDisabled : { color: accent }]}>{'< NEWER'}</Text>
+                </Pressable>
+                <Text testID="messages_cursor_range" style={styles.monoMuted}>
+                  {newestFirst.length > 0
+                    ? `#${String(newestFirst[0].sequence).padStart(4, '0')}..#${String(newestFirst[newestFirst.length - 1].sequence).padStart(4, '0')}`
+                    : ''}
+                </Text>
+                <Pressable
+                  testID="messages_older"
+                  disabled={msgNextBefore === null}
+                  onPress={olderMessagesPage}
+                  android_ripple={{ color: accent }}
+                  style={({ pressed }) => [
+                    styles.miniBtn,
+                    { marginLeft: 0 },
+                    msgNextBefore === null ? styles.miniBtnDisabled : { backgroundColor: `${accent}24`, borderColor: accent },
+                    pressed && styles.actionBtnPressed,
+                  ]}
+                >
+                  <Text style={[styles.miniBtnText, msgNextBefore === null ? styles.pagerTextDisabled : { color: accent }]}>{'OLDER >'}</Text>
+                </Pressable>
+              </View>
+            ) : null}
             {newestFirst.length === 0 ? <Text style={styles.empty}>No retained messages.</Text> : null}
             {newestFirst.map((message) => {
               const payload = (typeof message.payload === 'object' && message.payload !== null
@@ -677,7 +849,9 @@ export default function App() {
             <View style={styles.panelHead}>
               <View style={styles.panelActions}>
                 <Text style={styles.panelTitle}>STREAMS</Text>
-                <Text style={[styles.panelCount, { color: accent }]}>{streams.length}</Text>
+                <Text style={[styles.panelCount, { color: accent }]}>
+                  {streamAfter !== null || streamNextAfter !== null ? `${streams.length} (P${streamCursorStack.length + 1})` : streams.length}
+                </Text>
               </View>
               <View style={styles.panelActions}>
                 <Pressable testID="sweep_streams" onPress={sweepStreams} android_ripple={{ color: '#F59E0B' }} style={({ pressed }) => [styles.miniBtn, { backgroundColor: '#F59E0B26', borderColor: '#F59E0B' }, pressed && styles.actionBtnPressed]}>
@@ -703,6 +877,46 @@ export default function App() {
                 ) : null}
               </View>
             </View>
+            {streamAfter !== null || streamNextAfter !== null ? (
+              <View style={styles.pagerBar}>
+                {streamCursorStack.length > 1 ? (
+                  <Pressable testID="streams_first" onPress={firstStreamsPage} android_ripple={{ color: accent }} style={({ pressed }) => [styles.miniBtn, { backgroundColor: `${accent}24`, borderColor: accent, marginLeft: 0 }, pressed && styles.actionBtnPressed]}>
+                    <Text style={[styles.miniBtnText, { color: accent }]}>FIRST</Text>
+                  </Pressable>
+                ) : null}
+                <Pressable
+                  testID="streams_prev"
+                  disabled={streamAfter === null}
+                  onPress={prevStreamsPage}
+                  android_ripple={{ color: accent }}
+                  style={({ pressed }) => [
+                    styles.miniBtn,
+                    { marginLeft: 0 },
+                    streamAfter === null ? styles.miniBtnDisabled : { backgroundColor: `${accent}24`, borderColor: accent },
+                    pressed && styles.actionBtnPressed,
+                  ]}
+                >
+                  <Text style={[styles.miniBtnText, streamAfter === null ? styles.pagerTextDisabled : { color: accent }]}>{'< PREV'}</Text>
+                </Pressable>
+                <Text testID="streams_page_info" style={styles.monoMuted}>
+                  {`PAGE ${streamCursorStack.length + 1}${streamNextAfter ? '+' : ''} (${streams.length})`}
+                </Text>
+                <Pressable
+                  testID="streams_next"
+                  disabled={streamNextAfter === null}
+                  onPress={nextStreamsPage}
+                  android_ripple={{ color: accent }}
+                  style={({ pressed }) => [
+                    styles.miniBtn,
+                    { marginLeft: 0 },
+                    streamNextAfter === null ? styles.miniBtnDisabled : { backgroundColor: `${accent}24`, borderColor: accent },
+                    pressed && styles.actionBtnPressed,
+                  ]}
+                >
+                  <Text style={[styles.miniBtnText, streamNextAfter === null ? styles.pagerTextDisabled : { color: accent }]}>{'NEXT >'}</Text>
+                </Pressable>
+              </View>
+            ) : null}
             {streams.map((streamName) => {
               const isChecked = selectedStreams.includes(streamName);
               const selected = selectingStreams ? isChecked : stream === streamName;
@@ -762,7 +976,10 @@ const styles = StyleSheet.create({
   compactBtn: { borderRadius: 6, paddingVertical: 6, paddingHorizontal: 10, margin: 2 },
   compactBtnText: { fontFamily: MONO, fontWeight: '700', color: INK_PRIMARY, fontSize: 12 },
   miniBtn: { borderRadius: 4, borderWidth: 1, paddingVertical: 4, paddingHorizontal: 8, marginLeft: 6 },
+  miniBtnDisabled: { backgroundColor: SURFACE_RAISED, borderColor: BEZEL_LINE, opacity: 0.45 },
   miniBtnText: { fontFamily: MONO, fontWeight: '700', fontSize: 11, color: INK_PRIMARY },
+  pagerTextDisabled: { color: INK_MUTED },
+  pagerBar: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6, gap: 6 },
   actionPlain: { backgroundColor: SURFACE_RAISED, borderColor: BEZEL_LINE, borderWidth: 1 },
   actionBtnPressed: { opacity: 0.85 },
   actionText: { fontFamily: MONO, fontWeight: '700', color: INK_PRIMARY, fontSize: 13 },

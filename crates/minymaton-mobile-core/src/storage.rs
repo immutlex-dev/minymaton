@@ -33,6 +33,8 @@ pub struct Joined {
     pub handle: String,
 }
 
+pub const MAX_MESSAGE_PAGE_LIMIT: u32 = 100;
+
 #[derive(Clone, Debug, Serialize)]
 pub struct StoredMessage {
     pub message_id: String,
@@ -41,6 +43,14 @@ pub struct StoredMessage {
     pub payload: Value,
     pub publisher: Option<String>,
     pub direction: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct MessagesPage {
+    pub messages: Vec<StoredMessage>,
+    pub next_before: Option<u64>,
+    pub has_newer: bool,
+    pub total_retained: u64,
 }
 
 fn storage_error(error: &rusqlite::Error) -> CoreError {
@@ -82,7 +92,9 @@ impl Storage {
                      publisher TEXT,
                      direction TEXT NOT NULL,
                      PRIMARY KEY (profile_id, stream, message_id)
-                 );",
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_messages_stream_sequence
+                     ON messages (profile_id, stream, sequence DESC);",
             )
             .map_err(|error| storage_error(&error))?;
         Ok(Self {
@@ -344,34 +356,91 @@ impl Storage {
         self.with(|db| insert_message(db, profile_id, stream, message).map(drop))
     }
 
-    pub fn messages(
+    /// Returns one newest-first cursor page of retained messages for `stream`.
+    /// Passing `before = Some(seq)` yields rows strictly older than `seq`.
+    pub fn messages_page(
         &self,
         profile_id: &str,
         stream: &str,
+        before: Option<u64>,
         limit: u32,
-    ) -> Result<Vec<StoredMessage>, CoreError> {
+    ) -> Result<MessagesPage, CoreError> {
+        let clamped = limit.clamp(1, MAX_MESSAGE_PAGE_LIMIT);
+        let fetch_limit = i64::from(clamped) + 1;
+        let before_i64 = before.map(|seq| i64::try_from(seq).unwrap_or(i64::MAX));
         self.with(|db| {
-            let mut statement = db.prepare(
-                "SELECT message_id, sequence, published_at, payload, publisher, direction FROM (
-                     SELECT * FROM messages WHERE profile_id = ?1 AND stream = ?2
-                     ORDER BY sequence DESC LIMIT ?3
-                 ) ORDER BY sequence ASC",
-            )?;
-            statement
-                .query_map(params![profile_id, stream, limit], |row| {
-                    let payload: String = row.get(3)?;
-                    Ok(StoredMessage {
-                        message_id: row.get(0)?,
-                        sequence: row.get(1)?,
-                        published_at: row.get(2)?,
-                        payload: serde_json::from_str(&payload).unwrap_or(Value::Null),
-                        publisher: row.get(4)?,
-                        direction: row.get(5)?,
-                    })
-                })?
-                .collect()
+            let total_retained: u64 = db
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE profile_id = ?1 AND stream = ?2",
+                    params![profile_id, stream],
+                    |row| row.get::<_, i64>(0),
+                )?
+                .max(0) as u64;
+
+            let (sql, args): (&str, Vec<&dyn rusqlite::ToSql>) = match &before_i64 {
+                Some(cursor) => (
+                    "SELECT message_id, sequence, published_at, payload, publisher, direction
+                     FROM messages
+                     WHERE profile_id = ?1 AND stream = ?2 AND sequence < ?3
+                     ORDER BY sequence DESC
+                     LIMIT ?4",
+                    vec![&profile_id, &stream, cursor, &fetch_limit],
+                ),
+                None => (
+                    "SELECT message_id, sequence, published_at, payload, publisher, direction
+                     FROM messages
+                     WHERE profile_id = ?1 AND stream = ?2
+                     ORDER BY sequence DESC
+                     LIMIT ?3",
+                    vec![&profile_id, &stream, &fetch_limit],
+                ),
+            };
+            let mut statement = db.prepare(sql)?;
+            let mut messages = statement
+                .query_map(rusqlite::params_from_iter(args), row_to_stored_message)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+
+            let has_older = messages.len() > clamped as usize;
+            if has_older {
+                messages.truncate(clamped as usize);
+            }
+            let next_before = if has_older {
+                messages.last().map(|message| message.sequence)
+            } else {
+                None
+            };
+            let has_newer = match before_i64 {
+                Some(cursor) => db.query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM messages
+                         WHERE profile_id = ?1 AND stream = ?2 AND sequence >= ?3
+                     )",
+                    params![profile_id, stream, cursor],
+                    |row| row.get::<_, bool>(0),
+                )?,
+                None => false,
+            };
+
+            Ok(MessagesPage {
+                messages,
+                next_before,
+                has_newer,
+                total_retained,
+            })
         })
     }
+}
+
+fn row_to_stored_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
+    let payload: String = row.get(3)?;
+    Ok(StoredMessage {
+        message_id: row.get(0)?,
+        sequence: row.get(1)?,
+        published_at: row.get(2)?,
+        payload: serde_json::from_str(&payload).unwrap_or(Value::Null),
+        publisher: row.get(4)?,
+        direction: row.get(5)?,
+    })
 }
 
 fn insert_message(
