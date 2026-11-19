@@ -385,11 +385,36 @@ pub enum ReceiveResult {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EventDelivery {
+    #[default]
+    Broadcast,
+    Direct,
+}
+
+impl EventDelivery {
+    #[must_use]
+    pub const fn from_recipient(recipient: Option<&str>) -> Self {
+        if recipient.is_some() {
+            Self::Direct
+        } else {
+            Self::Broadcast
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct EventEnvelope {
     pub message_id: String,
     pub sequence: u64,
     pub published_at: String,
+    /// Whether this event was broadcast to the stream or directed to one subscriber.
+    #[serde(default)]
+    pub delivery: EventDelivery,
+    /// The recipient subscription label when `delivery` is `"direct"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient: Option<String>,
     /// The published message, exactly as it was published.
     pub payload: Value,
     /// The authenticated caller that published it, by its bearer token.

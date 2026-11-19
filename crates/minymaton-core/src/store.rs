@@ -13,8 +13,9 @@ use rusqlite::{
 use serde_json::{Value, json};
 
 use crate::api::{
-    AckOutcome, AckResult, DEFAULT_STREAM, EventEnvelope, InboxRead, NextReceive, PublishResult,
-    ReceiveResult, StartAt, StreamResult, SubscriptionEntry, SubscriptionResult, WaitReport,
+    AckOutcome, AckResult, DEFAULT_STREAM, EventDelivery, EventEnvelope, InboxRead, NextReceive,
+    PublishResult, ReceiveResult, StartAt, StreamResult, SubscriptionEntry, SubscriptionResult,
+    WaitReport,
 };
 use crate::error::{ErrorCode, ToolError};
 use crate::ids::{BATCH_PREFIX, HANDLE_PREFIX, MESSAGE_PREFIX, now, random_id};
@@ -2227,7 +2228,7 @@ fn fit(
     id: &RequestId,
 ) -> Result<Vec<EventEnvelope>, SealError> {
     let mut statement = tx.prepare(
-        "SELECT e.sequence, e.message_id, e.published_at, e.payload, p.publisher FROM events e
+        "SELECT e.sequence, e.message_id, e.published_at, e.payload, p.publisher, e.recipient_label FROM events e
          LEFT JOIN publishers p ON p.stream_id = e.stream_id AND p.sequence = e.sequence
          WHERE e.stream_id = ?1
            AND e.sequence > ?2
@@ -2272,7 +2273,7 @@ fn batch_contents(
     }
     let events = {
         let mut statement = tx.prepare(
-            "SELECT e.sequence, e.message_id, e.published_at, e.payload, p.publisher FROM events e
+            "SELECT e.sequence, e.message_id, e.published_at, e.payload, p.publisher, e.recipient_label FROM events e
              LEFT JOIN publishers p ON p.stream_id = e.stream_id AND p.sequence = e.sequence
              WHERE e.stream_id = ?1
                AND e.sequence BETWEEN ?2 AND ?3
@@ -2577,10 +2578,13 @@ fn exceeds_bounds(required: u64, max_bytes: u64, ack: Option<&AckResult>) -> Too
 fn event(row: &Row<'_>) -> Result<EventEnvelope, ToolError> {
     let sequence: i64 = row.get(0)?;
     let payload: String = row.get(3)?;
+    let recipient: Option<String> = row.get(5)?;
     Ok(EventEnvelope {
         message_id: row.get(1)?,
         sequence: to_u64(sequence),
         published_at: row.get(2)?,
+        delivery: EventDelivery::from_recipient(recipient.as_deref()),
+        recipient,
         payload: serde_json::from_str(&payload).map_err(|error| {
             ToolError::internal(format!("a stored payload is not JSON: {error}"))
         })?,

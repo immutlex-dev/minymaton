@@ -11,7 +11,8 @@ use rmcp::model::{
 use serde_json::Value;
 
 use crate::api::{
-    AckOutcome, AckResult, EventEnvelope, NextReceive, ReceiveResult, WaitEnd, WaitReport,
+    AckOutcome, AckResult, EventDelivery, EventEnvelope, NextReceive, ReceiveResult, WaitEnd,
+    WaitReport,
 };
 use crate::ids::{BATCH_PREFIX, HANDLE_PREFIX, MESSAGE_PREFIX, SAMPLE_TIMESTAMP, sample_id};
 
@@ -135,13 +136,19 @@ pub(crate) fn widest_batch_bytes(
     wire_bytes(&crate::json(&result), &widest_id(id), true)
 }
 
-/// The size a result carrying only this payload, from this publisher, can
-/// reach on any delivery.
-pub(crate) fn widest_single_event_bytes(payload: &Value, publisher: Option<&str>) -> u64 {
+/// The size a result carrying only this payload, from this publisher and
+/// optional directed recipient, can reach on any delivery.
+pub(crate) fn widest_single_event_bytes(
+    payload: &Value,
+    publisher: Option<&str>,
+    recipient: Option<&str>,
+) -> u64 {
     let event = EventEnvelope {
         message_id: sample_id(MESSAGE_PREFIX),
         sequence: u64::MAX,
         published_at: SAMPLE_TIMESTAMP.to_owned(),
+        delivery: EventDelivery::from_recipient(recipient),
+        recipient: recipient.map(str::to_owned),
         payload: payload.clone(),
         publisher: publisher.map(str::to_owned),
     };

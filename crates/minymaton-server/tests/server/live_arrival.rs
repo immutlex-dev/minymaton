@@ -39,6 +39,7 @@ async fn backlog_is_delivered_at_once() {
             "sequence": published["sequence"],
             "published_at": published["published_at"],
             "payload": "first order",
+            "delivery": "broadcast",
         }])
     );
     assert!(
@@ -961,5 +962,76 @@ fn listening_off_the_loopback_interface_is_refused() {
     assert!(
         !dir.path().join("queue.sqlite3").exists(),
         "the refused server created its database"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delivered_events_distinguish_broadcast_and_direct_recipients() {
+    let server = Server::start().await;
+    let client = server.client(legacy()).await;
+    client.create_stream("orders").await;
+    let alice = client.create_subscription("orders", "alice").await;
+    let bob = client.create_subscription("orders", "bob").await;
+
+    client
+        .publish("orders", "broad-1", json!("for-everyone"))
+        .await;
+    let alice_pub = client
+        .call("publish", json!({"stream": "orders", "idempotency_key": "direct-alice", "to": "alice", "payload": {"msg": "for-alice"}}))
+        .await
+        .ok();
+    assert_eq!(alice_pub["status"], "published");
+    let bob_pub = client
+        .call("publish", json!({"stream": "orders", "idempotency_key": "direct-bob", "payload": {"to": "bob", "msg": "for-bob"}}))
+        .await
+        .ok();
+    assert_eq!(bob_pub["status"], "published");
+
+    let alice_batch = client
+        .call("receive", receive_args(&alice, 10, LIMIT, 0))
+        .await
+        .ok();
+    assert_eq!(
+        payloads(&alice_batch),
+        vec![json!("for-everyone"), json!({"msg": "for-alice"})]
+    );
+    let alice_events = alice_batch["events"].as_array().unwrap();
+    assert_eq!(alice_events.len(), 2);
+    assert_eq!(alice_events[0]["delivery"], "broadcast");
+    assert!(
+        !alice_events[0]
+            .as_object()
+            .unwrap()
+            .contains_key("recipient")
+    );
+    assert_eq!(alice_events[1]["delivery"], "direct");
+    assert_eq!(alice_events[1]["recipient"], "alice");
+    assert!(
+        !alice_events
+            .iter()
+            .any(|ev| ev["payload"]["msg"] == "for-bob")
+    );
+
+    let bob_batch = client
+        .call("receive", receive_args(&bob, 10, LIMIT, 0))
+        .await
+        .ok();
+    assert_eq!(
+        payloads(&bob_batch),
+        vec![
+            json!("for-everyone"),
+            json!({"to": "bob", "msg": "for-bob"})
+        ]
+    );
+    let bob_events = bob_batch["events"].as_array().unwrap();
+    assert_eq!(bob_events.len(), 2);
+    assert_eq!(bob_events[0]["delivery"], "broadcast");
+    assert!(!bob_events[0].as_object().unwrap().contains_key("recipient"));
+    assert_eq!(bob_events[1]["delivery"], "direct");
+    assert_eq!(bob_events[1]["recipient"], "bob");
+    assert!(
+        !bob_events
+            .iter()
+            .any(|ev| ev["payload"]["msg"] == "for-alice")
     );
 }

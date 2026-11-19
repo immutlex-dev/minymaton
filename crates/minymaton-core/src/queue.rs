@@ -728,7 +728,7 @@ impl Queue {
             .or_else(|| inferred_recipient(&payload));
         let caller = access.caller.as_deref();
         // Until claim checks exist, every message must fit in a result by itself.
-        let needed = widest_single_event_bytes(&payload, caller);
+        let needed = widest_single_event_bytes(&payload, caller, recipient_label.as_deref());
         if needed > RESULT_LIMIT {
             return Err(ToolError::new(
                 ErrorCode::MessageTooLarge,

@@ -3220,3 +3220,49 @@ async fn cli_and_python_waiters_reconnect_across_mid_sse_keepalive_stream_cuts()
         assert!(server.await.unwrap_err().is_cancelled());
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cli_waiter_reports_broadcast_and_direct_delivery_metadata() {
+    let server = Server::start_with_request_log().await;
+    let client = server
+        .client(Lifecycle::Initialize(ProtocolVersion::V_2025_11_25))
+        .await;
+    client.create_stream("orders").await;
+    let alice = client.create_subscription("orders", "alice").await;
+    let bob = client.create_subscription("orders", "bob").await;
+
+    client
+        .publish("orders", "broad-1", json!("hello-all"))
+        .await;
+    client
+        .call(
+            "publish",
+            json!({"stream": "orders", "idempotency_key": "direct-1", "to": "alice", "payload": "hello-alice"}),
+        )
+        .await
+        .ok();
+
+    let home = tempfile::tempdir().unwrap();
+    let alice_out = command(home.path())
+        .args(["--url", server.url(), "--handle", &alice])
+        .output()
+        .unwrap();
+    assert!(alice_out.status.success(), "{alice_out:?}");
+    let alice_json: Value = serde_json::from_slice(&alice_out.stdout).unwrap();
+    assert_eq!(alice_json["events"].as_array().unwrap().len(), 2);
+    assert_eq!(alice_json["events"][0]["delivery"], "broadcast");
+    assert!(alice_json["events"][0].get("recipient").is_none());
+    assert_eq!(alice_json["events"][1]["delivery"], "direct");
+    assert_eq!(alice_json["events"][1]["recipient"], "alice");
+
+    let bob_out = command(home.path())
+        .args(["--url", server.url(), "--handle", &bob])
+        .output()
+        .unwrap();
+    assert!(bob_out.status.success(), "{bob_out:?}");
+    let bob_json: Value = serde_json::from_slice(&bob_out.stdout).unwrap();
+    assert_eq!(bob_json["events"].as_array().unwrap().len(), 1);
+    assert_eq!(bob_json["events"][0]["delivery"], "broadcast");
+    assert!(bob_json["events"][0].get("recipient").is_none());
+    assert_eq!(bob_json["events"][0]["payload"], "hello-all");
+}
