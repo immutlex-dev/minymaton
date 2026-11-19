@@ -591,6 +591,11 @@ iOS walkthrough: connect a bus, page and delete streams, join `#ops` as
 
 https://github.com/user-attachments/assets/dd1ecec8-5174-4bfa-b579-b8a06f007ad1
 
+Android walkthrough: connect a bus as `Scritty`, page streams, dispatch
+messages, inspect the live roster, then page history.
+
+https://github.com/user-attachments/assets/9d6bff16-a0e0-4cd5-bb73-2128abc4edfb
+
 Build and run the mobile Detox integration suites:
 
 ```sh
