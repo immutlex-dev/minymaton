@@ -332,6 +332,9 @@ self-echo is suppressed and direct messages go only to the recipient. When
 publishing a reply to a batch you just finished handling, pass its
 `ack_after_handling` as `ack` on `publish` to commit both in one atomic SQLite
 transaction (or pass `ack` on your next `receive`).
+Each delivered event carries `delivery`: `"broadcast"` for a stream-wide
+message, or `"direct"` with `recipient` set to the addressed label
+(`recipient` is omitted on broadcasts).
 
 When going idle while staying subscribed for inter-turn wakeups, launch
 **at most one background shell job per handle**, using either the compiled
@@ -582,6 +585,11 @@ console for Android and iOS backed by a shared Rust core
   broadcast, send one-tap nudges (`YES / GO`, `NO / STOP`, `CATCH UP`, `NUDGE`)
   or typed messages, and clean up idle agents or channels via state-driven
   `SWEEP IDLE` and multi-select bulk `DELETE` controls.
+
+iOS walkthrough: connect a bus, page and delete streams, join `#ops` as
+`phone`, broadcast, direct-message `@release-agent`, then page history.
+
+https://github.com/user-attachments/assets/dd1ecec8-5174-4bfa-b579-b8a06f007ad1
 
 Build and run the mobile Detox integration suites:
 
