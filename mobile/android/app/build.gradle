@@ -1,0 +1,96 @@
+apply plugin: "com.android.application"
+apply plugin: "org.jetbrains.kotlin.android"
+apply plugin: "com.facebook.react"
+
+// Bundle JS in debug when DETOX_BUNDLE_IN_DEBUG=true; release signing comes from a keystore outside Git.
+react {
+    def bundleInDebug = System.getenv('DETOX_BUNDLE_IN_DEBUG')
+    if (bundleInDebug != null && bundleInDebug.toBoolean()) {
+        debuggableVariants = []
+    }
+    autolinkLibrariesWithApp()
+}
+
+def releaseSetting = { String name ->
+    def value = project.findProperty(name) ?: System.getenv(name)
+    return value == null ? null : value.toString()
+}
+
+android {
+    ndkVersion rootProject.ext.ndkVersion
+    buildToolsVersion rootProject.ext.buildToolsVersion
+    compileSdk rootProject.ext.compileSdkVersion
+
+    namespace "com.minymaton"
+    defaultConfig {
+        applicationId "com.minymaton"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 7
+        versionName "0.1.0"
+        testBuildType System.getProperty('testBuildType', 'debug')
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+        ndk {
+            abiFilters 'arm64-v8a', 'x86_64'
+        }
+    }
+    signingConfigs {
+        release {
+            def storeFilePath = releaseSetting('MINYMATON_RELEASE_STORE_FILE')
+            if (storeFilePath != null) {
+                storeFile file(storeFilePath)
+            }
+            storePassword releaseSetting('MINYMATON_RELEASE_STORE_PASSWORD')
+            keyAlias releaseSetting('MINYMATON_RELEASE_KEY_ALIAS')
+            keyPassword releaseSetting('MINYMATON_RELEASE_KEY_PASSWORD')
+        }
+    }
+    buildTypes {
+        debug {
+            buildConfigField "boolean", "IS_NEW_ARCHITECTURE_ENABLED", "false"
+        }
+        release {
+            signingConfig signingConfigs.release
+            minifyEnabled false
+            buildConfigField "boolean", "IS_NEW_ARCHITECTURE_ENABLED", "false"
+        }
+    }
+    packagingOptions {
+        jniLibs {
+            pickFirsts += ['**/libc++_shared.so']
+        }
+    }
+}
+
+def releaseSettings = [
+    'MINYMATON_RELEASE_STORE_FILE',
+    'MINYMATON_RELEASE_STORE_PASSWORD',
+    'MINYMATON_RELEASE_KEY_ALIAS',
+    'MINYMATON_RELEASE_KEY_PASSWORD',
+]
+tasks.matching { it.name == 'preReleaseBuild' }.configureEach {
+    doFirst {
+        def missing = releaseSettings.findAll { !releaseSetting(it) }
+        if (!missing.isEmpty()) {
+            throw new GradleException("release signing is not configured: missing ${missing.join(', ')}")
+        }
+        def store = file(releaseSetting('MINYMATON_RELEASE_STORE_FILE'))
+        if (!store.isFile()) {
+            throw new GradleException("release keystore not found: ${store}")
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation("com.facebook.react:react-android")
+    implementation("com.facebook.react:hermes-android")
+
+    androidTestImplementation('com.wix:detox:+')
+    androidTestImplementation 'androidx.appcompat:appcompat:1.7.0'
+    androidTestImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test:runner:1.6.2'
+    androidTestImplementation 'androidx.test:rules:1.6.1'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.6.1'
+}

@@ -311,11 +311,19 @@ async fn agent_key_and_description_binding_isolate_bound_channels_and_unbound_ca
         json!({"status": "empty"})
     );
     assert_eq!(
-        message_ids(&receive_slot(&coder_b.list_tools().await, "coder", "trial-b")),
+        message_ids(&receive_slot(
+            &coder_b.list_tools().await,
+            "coder",
+            "trial-b"
+        )),
         vec![msg_b["message_id"].clone()]
     );
     assert_eq!(
-        message_ids(&receive_slot(&coder_team.list_tools().await, "coder", "agents")),
+        message_ids(&receive_slot(
+            &coder_team.list_tools().await,
+            "coder",
+            "agents"
+        )),
         vec![msg_team["message_id"].clone()]
     );
 
@@ -334,12 +342,8 @@ async fn agent_key_and_description_binding_isolate_bound_channels_and_unbound_ca
         ],
     )
     .await;
-    let desc_team = desc_server
-        .client_with_token(ALICE_TOKEN, modern())
-        .await;
-    let desc_trial_a = desc_server
-        .client_with_token(TRIAL_A_TOKEN, modern())
-        .await;
+    let desc_team = desc_server.client_with_token(ALICE_TOKEN, modern()).await;
+    let desc_trial_a = desc_server.client_with_token(TRIAL_A_TOKEN, modern()).await;
     let team_pub = desc_team
         .publish("agents", "d1", json!("for agents desk"))
         .await;

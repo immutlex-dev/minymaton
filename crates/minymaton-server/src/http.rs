@@ -496,11 +496,7 @@ async fn auth_gate(
 /// Enforces cluster enrollment agreement, MCP session ownership (`PC-04`),
 /// per-principal session & concurrency limits (`PC-07`), and live token
 /// revocation (`O-R4-2`).
-async fn session_gate(
-    State(gate): State<GateState>,
-    mut request: Request,
-    next: Next,
-) -> Response {
+async fn session_gate(State(gate): State<GateState>, mut request: Request, next: Next) -> Response {
     let current_auth = gate.auth.current_auth();
     if gate.auth.enforce_cluster_enrollment
         && let Some(auth) = &current_auth
@@ -544,9 +540,7 @@ async fn session_gate(
             )
                 .into_response();
         }
-        request
-            .extensions_mut()
-            .insert(TokenCancel(cancel.clone()));
+        request.extensions_mut().insert(TokenCancel(cancel.clone()));
         Some(cancel)
     } else {
         None

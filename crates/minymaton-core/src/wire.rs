@@ -35,6 +35,38 @@ pub(crate) fn discovery_bytes(result: &impl serde::Serialize) -> u64 {
     )
 }
 
+/// Truncates `names` so the serialized discovery/delete result built from the
+/// kept prefix fits within [`RESULT_LIMIT`] (`16_384` bytes).
+pub(crate) fn fit_deleted_names<R, F>(
+    mut names: Vec<String>,
+    build: F,
+) -> Result<Vec<String>, crate::ToolError>
+where
+    R: serde::Serialize,
+    F: Fn(&[String]) -> R,
+{
+    if discovery_bytes(&build(&names)) <= RESULT_LIMIT {
+        return Ok(names);
+    }
+    let mut lo = 0usize;
+    let mut hi = names.len();
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if discovery_bytes(&build(&names[..mid])) <= RESULT_LIMIT {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    if lo == 0 && discovery_bytes(&build(&names[..0])) > RESULT_LIMIT {
+        return Err(crate::ToolError::internal(
+            "delete result metadata exceeds the result byte limit",
+        ));
+    }
+    names.truncate(lo);
+    Ok(names)
+}
+
 /// Bytes on the wire for this result object, answering `id`. `modern` is a
 /// 2026-07-28 exchange, whose results keep `resultType`.
 pub(crate) fn wire_bytes(result: &Value, id: &RequestId, modern: bool) -> u64 {

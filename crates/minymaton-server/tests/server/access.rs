@@ -311,7 +311,10 @@ async fn bound_channel_isolates_trial_callers_across_all_tools_and_resources() {
     let handle_a = sub_a["handle"].as_str().expect("handle_a").to_owned();
 
     let recovered_a = trial_a
-        .call("subscription", json!({"action": "recover", "label": "desk"}))
+        .call(
+            "subscription",
+            json!({"action": "recover", "label": "desk"}),
+        )
         .await
         .ok();
     assert_eq!(recovered_a["handle"], handle_a);
@@ -322,7 +325,10 @@ async fn bound_channel_isolates_trial_callers_across_all_tools_and_resources() {
         .ok();
     assert_eq!(listed_subs_a["stream"], "trial-a");
     assert_eq!(
-        listed_subs_a["subscriptions"].as_array().expect("subs").len(),
+        listed_subs_a["subscriptions"]
+            .as_array()
+            .expect("subs")
+            .len(),
         1
     );
 
@@ -343,7 +349,10 @@ async fn bound_channel_isolates_trial_callers_across_all_tools_and_resources() {
         .await
         .ok();
     assert_eq!(alice_sub["stream"], "agents");
-    let alice_handle = alice_sub["handle"].as_str().expect("alice_handle").to_owned();
+    let alice_handle = alice_sub["handle"]
+        .as_str()
+        .expect("alice_handle")
+        .to_owned();
     alice
         .call(
             "publish",
@@ -360,7 +369,10 @@ async fn bound_channel_isolates_trial_callers_across_all_tools_and_resources() {
         (&alice, false, "trial-a", &handle_a),
     ] {
         let create_err = client
-            .call("stream", json!({"action": "create", "name": blocked_stream}))
+            .call(
+                "stream",
+                json!({"action": "create", "name": blocked_stream}),
+            )
             .await
             .err();
         assert_eq!(

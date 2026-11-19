@@ -5,14 +5,20 @@
 pub mod api;
 mod error;
 mod ids;
+mod ops;
 mod policy;
 mod queue;
 mod signals;
 mod store;
 mod wire;
 
+pub use api::{StreamArgs, StreamResult, SubscriptionArgs, SubscriptionResult};
 pub use error::{ErrorCode, ToolError};
 pub use ids::{INBOX_PREFIX, inbox_uri};
+pub use ops::{
+    OutputFormat, render_stream_to_string, render_subscription_to_string, stream_to_string,
+    subscription_to_string,
+};
 pub use policy::{
     Access, Limits, MAX_BOUND_CHANNELS, MAX_CONCURRENT_REQUESTS_PER_PRINCIPAL, MAX_ENROLLED_TOKENS,
     MAX_RETAINED_EVENTS_PER_CHANNEL, MAX_SESSIONS_PER_PRINCIPAL, MAX_SUBSCRIPTIONS_PER_CHANNEL,
@@ -20,8 +26,8 @@ pub use policy::{
 };
 pub use queue::{AccessRefresher, Admitted, Delivery, Inbox, Queue, Waiter};
 pub use store::{
-    Admission, AgentBindingRow, Batch, Bounds, DeletedStream, Publication, Published, QueueReader,
-    QueueStore, Reader, Selection, Store,
+    Admission, AgentBindingRow, Batch, Bounds, DeletedStream, DeletedSubscription, Publication,
+    Published, QueueReader, QueueStore, Reader, Selection, Store,
 };
 pub use wire::RESULT_LIMIT;
 

@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 #[schemars(extend("type" = "object"), transform = flat_action_schema)]
 pub enum StreamArgs {
@@ -33,6 +33,26 @@ pub enum StreamArgs {
         /// The caller to remove.
         caller: String,
     },
+    /// Deletes an open or accessible private stream (refuses "agents", bound
+    /// channels, and any stream pinned by --description-stream).
+    Delete {
+        /// The stream to delete.
+        name: String,
+    },
+    /// Atomically deletes multiple streams, skipping absent names and aborting
+    /// without changes if any named stream is forbidden or invalid.
+    DeleteBulk {
+        /// The stream names to delete atomically.
+        names: Vec<String>,
+    },
+    /// State-driven sweep of idle accessible streams (never time-based).
+    /// Protects "agents", bound channels, --description-stream, private streams
+    /// not listed for the caller, `keep`, and streams with waiting or follow-bound
+    /// subscriptions.
+    SweepIdle {
+        /// Optional stream names to protect from sweeping.
+        keep: Option<Vec<String>>,
+    },
     List {
         /// Return names strictly after this name, from a previous page.
         after: Option<String>,
@@ -41,7 +61,7 @@ pub enum StreamArgs {
     },
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum StreamResult {
     /// The stream now exists.
@@ -50,6 +70,18 @@ pub enum StreamResult {
     Granted { stream: String, caller: String },
     /// The caller is no longer a member of the private stream.
     Revoked { stream: String, caller: String },
+    /// The stream was deleted.
+    Deleted { stream: String },
+    /// The named streams were deleted.
+    DeletedBulk {
+        deleted: Vec<String>,
+        deleted_count: u64,
+    },
+    /// All accessible idle streams were swept and deleted.
+    Swept {
+        deleted: Vec<String>,
+        deleted_count: u64,
+    },
     Listed {
         streams: Vec<String>,
         next_after: Option<String>,
@@ -66,7 +98,7 @@ pub enum StartAt {
     Latest,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 #[schemars(extend("type" = "object"), transform = flat_action_schema)]
 pub enum SubscriptionArgs {
@@ -93,6 +125,21 @@ pub enum SubscriptionArgs {
         stream: Option<String>,
         /// The subscription label to retire and remove from the stream.
         label: String,
+    },
+    /// Atomically deletes multiple subscriptions on the stream, skipping absent
+    /// labels and aborting without changes if any named label is pinned.
+    DeleteBulk {
+        stream: Option<String>,
+        /// The subscription labels to retire and remove atomically from the stream.
+        labels: Vec<String>,
+    },
+    /// State-driven sweep of idle subscriptions on the stream (never time-based).
+    /// Protects active `waiting: true` guards, `follow` bindings, `--description-subscription`,
+    /// and any label in `keep`.
+    SweepIdle {
+        stream: Option<String>,
+        /// Optional subscription labels to protect from sweeping.
+        keep: Option<Vec<String>>,
     },
     List {
         stream: Option<String>,
@@ -162,12 +209,15 @@ fn flat_action_schema(schema: &mut schemars::Schema) {
 
 pub const DEFAULT_STREAM: &str = "agents";
 
-#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, JsonSchema)]
 pub struct SubscriptionEntry {
     pub label: String,
     pub handle: String,
     /// Point-in-time, process-local observation of an active receive wait guard.
-    /// Not a durable reservation or proof that the remote client is alive.
+    /// Follow bindings and `--description-*` pinned rows are also protected in
+    /// storage; an agent between `minymaton-wait` runs without `follow` should
+    /// pass `keep` or use `follow` if sweeping live. Not a durable reservation
+    /// or proof that the remote client is alive.
     pub waiting: bool,
     /// RFC 3339 timestamp of the subscription's latest create, receive, or acknowledge.
     pub last_active_at: String,
@@ -176,7 +226,7 @@ pub struct SubscriptionEntry {
     pub metadata: Option<BTreeMap<String, Value>>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum SubscriptionResult {
     /// A new subscription on the stream.
@@ -197,6 +247,18 @@ pub enum SubscriptionResult {
     },
     /// The subscription was deleted and its label is free again.
     Deleted { stream: String, label: String },
+    /// The named subscriptions were deleted.
+    DeletedBulk {
+        stream: String,
+        deleted: Vec<String>,
+        deleted_count: u64,
+    },
+    /// All idle subscriptions on the stream were swept and deleted.
+    Swept {
+        stream: String,
+        deleted: Vec<String>,
+        deleted_count: u64,
+    },
     Listed {
         stream: String,
         subscriptions: Vec<SubscriptionEntry>,
@@ -225,7 +287,7 @@ pub enum FollowResult {
     },
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PublishArgs {
     /// The stream to publish to.
@@ -251,7 +313,7 @@ pub struct PublishArgs {
     pub claims: Option<String>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum PublishResult {
     /// The message is durably committed.
@@ -265,7 +327,7 @@ pub enum PublishResult {
     },
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReceiveArgs {
     /// The subscription handle.
@@ -284,7 +346,7 @@ pub struct ReceiveArgs {
     pub ack: Option<String>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ReceiveResult {
     /// A batch of events. Handle all of them, then acknowledge the batch.
@@ -323,7 +385,7 @@ pub enum ReceiveResult {
     },
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct EventEnvelope {
     pub message_id: String,
     pub sequence: u64,
@@ -336,13 +398,13 @@ pub struct EventEnvelope {
     pub publisher: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct AckResult {
     pub batch_id: String,
     pub outcome: AckOutcome,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AckOutcome {
     /// This acknowledgement committed the batch.
@@ -351,12 +413,12 @@ pub enum AckOutcome {
     AlreadyAcked,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct WaitReport {
     pub ended_by: WaitEnd,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitEnd {
     /// An unacknowledged batch was waiting and is delivered again.
@@ -371,7 +433,7 @@ pub enum WaitEnd {
     Superseded,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct NextReceive {
     pub handle: String,
     pub max_events: u64,

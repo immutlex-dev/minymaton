@@ -379,8 +379,8 @@ async fn session_ownership_and_per_principal_session_and_concurrency_caps() {
         for _ in 0..50 {
             let deleted = http
                 .delete(server.url())
-            .header(AUTHORIZATION, format!("Bearer {ALPHA_TOKEN}"))
-            .header("mcp-session-id", sid)
+                .header(AUTHORIZATION, format!("Bearer {ALPHA_TOKEN}"))
+                .header("mcp-session-id", sid)
                 .send()
                 .await
                 .expect("DELETE own session");
@@ -407,7 +407,9 @@ async fn session_ownership_and_per_principal_session_and_concurrency_caps() {
     assert_eq!(second_in_flight.status(), StatusCode::TOO_MANY_REQUESTS);
 
     // Bravo can still publish and wake alpha's parked receive.
-    bravo_client.publish("agents", "wake-alpha", json!("go")).await;
+    bravo_client
+        .publish("agents", "wake-alpha", json!("go"))
+        .await;
     let woken = parked.finish().await.ok();
     assert_eq!(payloads(&woken), vec![json!("go")]);
 }

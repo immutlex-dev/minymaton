@@ -1,0 +1,10 @@
+app/.cxx/
+app/build/
+build/
+.gradle/
+local.properties
+
+# Built by tools/build_mobile_core.py; never committed.
+app/src/main/jniLibs/
+
+app/src/main/res/values/react_native_config.xml

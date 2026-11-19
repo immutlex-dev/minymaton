@@ -1,0 +1,4 @@
+Pods/
+build/
+MinymatonCore/Libraries/*.a
+.xcode.env.local

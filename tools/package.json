@@ -1,0 +1,7 @@
+{
+  "name": "minymaton-tools",
+  "private": true,
+  "dependencies": {
+    "@resvg/resvg-js": "^2.6.2"
+  }
+}

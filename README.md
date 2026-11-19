@@ -2,7 +2,7 @@
   <img src="assets/logo.svg" alt="minymaton logo" width="300"/>
   <h1>minymaton</h1>
   <p><strong>A shared inbox for coding agents, across sessions and machines.</strong></p>
-  <p><a href="https://cp.scritty.dev/minymaton-try/"><strong>Try it live (24h private channel)</strong></a> | <a href="https://crates.io/crates/minymaton">crates.io</a> | <a href="#quick-start">Quick start</a> | <a href="deploy/README.md">Deployment guide</a></p>
+  <p><a href="https://cp.scritty.dev/minymaton-try/"><strong>Try it live (24h private channel)</strong></a> | <a href="https://crates.io/crates/minymaton">crates.io</a> | <a href="#quick-start">Quick start</a> | <a href="#mobile-app-android--ios">Mobile app</a> | <a href="deploy/README.md">Deployment guide</a></p>
 
   [![Rust](https://img.shields.io/badge/rust-1.98%2B-orange.svg)](https://www.rust-lang.org/)
   [![License](https://img.shields.io/badge/license-AGPL--3.0--only-green.svg)](LICENSE)
@@ -86,7 +86,9 @@ standalone native Rust waiter (`minymaton-wait`, built for 6 targets) and one
 portable Python 3 stdlib waiter (`tools/minymaton-wait.py`) bridge a parked
 receive to background-job completion. Task boards, squads, file reservations and
 review workflows stay outside the bus; optional tool-list delivery adds the
-batch tools described below.
+batch tools described below. A standalone Android and iOS app (`mobile/` +
+`crates/minymaton-mobile-core`) lets you monitor streams, inspect live rosters
+and dispatch replies or nudges over HTTPS from a phone without SSH tunnels.
 
 **Clients share an HTTP contract, not a filesystem or CPU architecture.**
 Linux, macOS and Windows agents (`x86_64` and `aarch64`) can use the same
@@ -542,6 +544,56 @@ stream  {"action":"grant","name":"past-projects","caller":"lee"}
 
 **Channel-bound trial tokens.** Adding a third column to a line in `--bearer-token-file` (`CALLER<TAB>TOKEN<TAB>CHANNEL`) binds that caller exclusively to `CHANNEL` (any valid identifier except `agents`). The server provisions each bound channel as an isolated private stream, defaults omitted `stream` arguments on `subscription` and `follow` to that channel, hides every other stream from `stream` `list`, and refuses stream creation or membership changes by bound callers. On Unix, sending `SIGHUP` reloads `--bearer-token-file` in place—provisioning newly added channels and immediately cancelling in-flight requests and MCP sessions for removed or rotated tokens—while `--retire-channel CHANNEL` deletes a retired channel's stream, events, batches, subscriptions and idempotency records.
 
+## Mobile App (Android & iOS)
+
+`mobile/` ships a standalone React Native (`0.76.9`) operator
+console for Android and iOS backed by a shared Rust core
+([`crates/minymaton-mobile-core`](crates/minymaton-mobile-core)).
+
+- **Architecture:** `crates/minymaton-mobile-core` provides a sessionless
+  `MCP-Protocol-Version: 2026-07-28` Streamable HTTP client (`hyper` +
+  `tokio-rustls` + `webpki-roots`), an on-device bundled SQLite WAL inbox,
+  and event-driven `CancellationToken` receive watches, exposed over Android JNI
+  (`MinymatonModule.kt`) and an iOS C static library + Swift bridge
+  (`MinymatonCoreBridge.swift`).
+- **Security & durability:** Bearer tokens are sealed in the Android Keystore
+  (`AES-256-GCM` with `profile_id` as AAD) and iOS Keychain
+  (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`) and never touch SQLite or
+  error strings. Incoming batches persist to on-device SQLite before `batch_id`
+  is acknowledged to the server. Backgrounding (`pause`) cancels active
+  `receive(wait: true)` calls immediately so the server drops its `WaitGuard`;
+  foregrounding (`resume`) restarts stream watchers, flushing any owed
+  `pending_ack` and issuing `receive(wait: true)` so queued backlog returns
+  immediately before parking again.
+  Opening an unjoined stream pulls retained server history via an ephemeral
+  reader subscription that deletes itself immediately.
+- **Dispatch deck & sweep controls:** Add any HTTPS-proxied `minymaton-server` `/mcp`
+  endpoint (including a 24-hour channel from
+  [`https://cp.scritty.dev/minymaton-try/`](https://cp.scritty.dev/minymaton-try/)),
+  switch between saved bus profiles, and open any stream to access the
+  top-docked `DISPATCH DECK` immediately above the roster and history. Inspect
+  `WAITING` / `IDLE` subscriptions (idle entries collapse after 8 with a
+  `SHOW +N IDLE` toggle while keeping the selected target and joined label
+  visible), tap a roster entry to route a direct message (`TARGET: @<label>`,
+  setting `to` + `payload.to`) or clear to broadcast, send one-tap nudges
+  (`YES / GO`, `NO / STOP`, `CATCH UP`, `NUDGE`) or typed messages, and clean up
+  idle agents or channels via state-driven `SWEEP IDLE` and multi-select bulk
+  `DELETE` controls.
+
+Build and run the mobile Detox integration suites:
+
+```sh
+cd mobile && npm ci
+# Android (requires Android SDK, NDK, and JDK 17)
+npm run detox:build:android
+npm run detox:test:android
+# Signed release APK (expects MINYMATON_RELEASE_STORE_FILE, _STORE_PASSWORD, _KEY_ALIAS, _KEY_PASSWORD)
+npm run build:release:android
+# iOS Simulator on macOS (requires Xcode, CocoaPods, and aarch64-apple-ios-sim target)
+npm run detox:build:ios
+npm run detox:test:ios
+```
+
 ## Tools
 
 `stream` and `subscription` advertise flat object input schemas with an
@@ -559,13 +611,17 @@ not make it optional for every action.
 
 | Tool | What it does |
 |---|---|
-| `stream` | Create or list the streams you may use. `create` with `members` makes a private stream; `grant` and `revoke` change its members. Messages keep commit order |
-| `subscription` | Create, recover, delete or list subscriptions in a stream. Omit the label on creation to atomically claim `agent-N` (optional `start_at: "latest" \| "earliest"` and `metadata`) |
+| `stream` | Create, list, delete, or sweep the streams you may use. `create` with `members` makes a private stream; `grant` and `revoke` change its members; `delete`, atomic `delete_bulk`, and state-driven `sweep_idle` (never time-based; protects `agents`, bound channels, `--description-stream`, inaccessible private streams, `keep`, and streams with active `waiting: true` or `follow`-bound subscriptions) remove unused streams. Messages keep commit order |
+| `subscription` | Create, recover, delete, bulk-delete, sweep, or list subscriptions in a stream. Omit the label on creation to atomically claim `agent-N` (optional `start_at: "latest" \| "earliest"` and `metadata`); `delete_bulk` atomically removes multiple labels, and state-driven `sweep_idle` (never time-based) removes idle subscriptions while protecting `waiting: true` guards, `follow` bindings, `--description-subscription`, and `keep` |
 | `publish` | Commit one message, any JSON value, with optional `from` (suppresses self-echo), `to` (direct recipient), transactional `ack` (`batch_id`), and `claims` (`message_id` to claim for `from`; first claim wins). Retrying with the same `idempotency_key` and payload returns the original result; reusing the key with a different payload is refused |
 | `receive` | Next batch, bounded by `max_events` and `max_bytes` (at most 16384), with event-driven `wait` (`true` or `false`). Carries `ack` for the previous batch |
 | `ack` | Description delivery only. Acknowledges the batch shown in the description |
 | `message_<batch_id>` | Tools delivery only. Acknowledges that batch |
 | `follow` | Agent endpoints only. Binds this agent's tool list to a stream |
+
+### CLI Management (DRY `*_to_string`)
+
+`minymaton stream ...` and `minymaton subscription ...` provide direct CLI parity (`create`, `grant`, `revoke`, `recover`, `delete`, `delete-bulk`, `sweep-idle`, `list`) over either a live server (`--url URL [--token-env VAR] [--ca-file PATH]`) or a stopped local database (`--db PATH`), with `--format json|text|csv`. Both MCP tools and both CLI target modes execute and render through the single DRY `minymaton-core` `*_to_string` codepath (`stream_to_string`, `render_stream_to_string`, `subscription_to_string`, `render_subscription_to_string`). Sweep operations are strictly state/event-driven (`waiting: true`, `follow`, `--description-*`, and bound-channel protections — never time-based); an agent between `minymaton-wait` runs without `follow` should pass `--keep` or use `follow` if sweeping live.
 
 ## Server Options
 
@@ -682,11 +738,19 @@ Backend trait and SQLite transaction tests verify `Queue::with_backend` over
 `QueueStore` and `QueueReader` and check ownership again in `release`
 immediately before recording a delivery.
 
+Mobile integration tests in `crates/minymaton-mobile-core/tests/mobile_core.rs`
+spawn real loopback HTTP and custom-CA TLS `minymaton-server` instances to verify
+token rejection without secret echo, persist-before-ACK crash recovery,
+`@recipient` direct-routing isolation, retained history sync cleanup,
+background pause/resume catch-up, multi-bus isolation, state-driven sweep and bulk deletion,
+and custom-CA TLS. End-to-end Detox suites (`mobile/e2e/`) exercise flows `f1`–`f6` on
+Android and iOS against live loopback `minymaton-server` processes.
+
 ## Architecture
 
 `Queue` in `minymaton-core` (`Queue::open` and `Queue::with_backend`) decouples MCP protocol dispatch and in-memory event signaling (`Signals`) from durable persistence through two traits at the atomic queue-command boundary:
 
-- **`QueueStore` (`Send`)**: Dispatches all atomic queue commands and receive lifecycle transitions: `create_stream`, `claim_subscription`, `recover_subscription`, `delete_subscription`, `follow_stream`, `ensure_subscription`, `publish` (`Publication<'_>`), `admit`, `select`, `release`, `read_inbox`, `read_description`, and `pending_description`.
+- **`QueueStore` (`Send`)**: Dispatches all atomic queue commands and receive lifecycle transitions: `create_stream`, `change_member`, `claim_subscription`, `recover_subscription`, `delete_subscription`, `delete_subscriptions_bulk`, `sweep_idle_subscriptions`, `follow_stream`, `ensure_subscription`, `provision_channel`, `supports_idle_sweep`, `delete_stream`, `delete_stream_for_access`, `delete_streams`, `sweep_idle_streams`, `activate_enrollment`, `publish` (`Publication<'_>`), `admit`, `select`, `release`, `read_inbox`, `read_description`, and `pending_description`.
 - **`QueueReader` (`Send`)**: Dispatches read-only discovery and inbox queries: `list_streams`, `list_subscriptions`, `agent_binding`, `inbox_unread`, and `inbox`.
 - **`Signals`**: Manages event-driven per-stream commit watch channels, per-subscription ownership generation watch channels, and RAII `WaitGuard` active-wait tracking in memory within the `Queue` process.
 - **Bundled SQLite WAL backend**: The repository ships the single-node bundled `SQLite` WAL (`synchronous=FULL`, `busy_timeout=0`) `Store` and `Reader` types implementing `QueueStore` and `QueueReader`. `Queue::with_backend` takes any other implementation of those traits; `Signals` wake receives parked in the same process, so a backend shared by several server processes must also raise them from the other processes' commits. See [`deploy/README.md`](deploy/README.md) for the operator deployment topology.
@@ -712,7 +776,7 @@ flowchart TB
     subgraph core["minymaton-core | Queue + Signals"]
         queue["Queue coordinator (Queue::open / Queue::with_backend)<br/>Strict typed validation | 16 KiB receive framing<br/>ACK-only calls preserve parked ownership"]
         signals["Signals (in-memory watch channels)<br/>Per-stream commits | per-subscription ownership<br/>Wakeup | supersede | deletion | WaitGuard"]
-        writer["QueueStore trait (bundled SQLite Store)<br/>create_stream | claim/recover/delete_subscription | follow_stream | ensure_subscription<br/>publish | admit | select | release | read_inbox | read/pending_description"]
+        writer["QueueStore trait (bundled SQLite Store)<br/>create/delete/sweep streams | claim/recover/delete/sweep subscriptions | follow_stream | ensure_subscription<br/>publish | admit | select | release | read_inbox | read/pending_description"]
         reader["QueueReader trait (bundled SQLite Reader)<br/>list_streams | list_subscriptions | agent_binding | inbox_unread | inbox"]
     end
 
@@ -796,6 +860,10 @@ Editable native draw.io source: [`docs/diagrams/minymaton-architecture.drawio`](
 | `crates/minymaton-core` | `Queue` coordinator, `QueueStore` and `QueueReader` traits, in-memory `Signals`, wire types, and bundled SQLite WAL `Store` + `Reader` |
 | `crates/minymaton-server` | rmcp over axum, the tool surface, `minymaton-server` and `minymaton-storage-check` binaries |
 | `crates/minymaton` | The installable `minymaton` server binary (`cargo install minymaton`) |
+| `crates/minymaton-mobile-core` | Shared Rust mobile core: sessionless MCP `2026-07-28` client, on-device SQLite WAL inbox, cancellable stream watches, Android JNI and iOS C FFI |
+| `mobile/` | React Native (`0.76.9`) Android and iOS operator app, Keystore/Keychain bridges and Detox E2E suites (`mobile/e2e/`) |
+| `tools/build_mobile_core.py` | Cross-compiles `minymaton-mobile-core` with Android NDK Clang into `mobile/android/app/src/main/jniLibs/` (`arm64-v8a`, `x86_64`) |
+| `tools/generate_mobile_icons.py` | Renders Android mipmap and iOS `AppIcon.appiconset` PNGs from `assets/logo.svg` |
 | `crates/minymaton-server/src/bin/minymaton-wait.rs` | Standalone native Rust background waiter (`minymaton-wait --handle sub_... --url URL [--ack bat_...] [--max-events N] [--max-bytes N] [--ca-file PATH] [--config PATH] [--token-env VAR]`) |
 | `tools/minymaton-wait.py` | Portable Python 3 stdlib-only background waiter with identical CLI, env, INI, TLS, exit-code, and wire semantics |
 | `tools/stage_helpers.py` | Stages the 6 native `minymaton-wait-<target>` binaries, `minymaton-wait.py`, `LICENSE`, `source.tar.gz`, `README.txt`, and `SHA256SUMS` |

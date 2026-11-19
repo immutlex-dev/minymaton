@@ -13,8 +13,8 @@ use rusqlite::{
 use serde_json::{Value, json};
 
 use crate::api::{
-    AckOutcome, AckResult, EventEnvelope, InboxRead, NextReceive, PublishResult, ReceiveResult,
-    StartAt, StreamResult, SubscriptionEntry, SubscriptionResult, WaitReport,
+    AckOutcome, AckResult, DEFAULT_STREAM, EventEnvelope, InboxRead, NextReceive, PublishResult,
+    ReceiveResult, StartAt, StreamResult, SubscriptionEntry, SubscriptionResult, WaitReport,
 };
 use crate::error::{ErrorCode, ToolError};
 use crate::ids::{BATCH_PREFIX, HANDLE_PREFIX, MESSAGE_PREFIX, now, random_id};
@@ -119,6 +119,14 @@ pub struct DeletedStream {
     pub agent_keys: Vec<String>,
 }
 
+/// Summary of a deleted subscription for waking parked waiters and clearing bindings.
+#[derive(Clone, Debug)]
+pub struct DeletedSubscription {
+    pub subscription_id: i64,
+    pub label: String,
+    pub bound_agent: Option<String>,
+}
+
 /// The queue's writes at the atomic queue-command boundary. Each method is one
 /// all-or-nothing queue command; a backend decides how it stores and orders
 /// them. [`crate::Queue`] owns argument validation, wake-up signals and the
@@ -197,10 +205,63 @@ pub trait QueueStore: Send {
     /// refusing to overwrite any open or other-member stream.
     fn provision_channel(&mut self, channel: &str) -> Result<(), ToolError>;
 
+    /// Whether this store enforces single-process `Signals` ownership so
+    /// state-driven `sweep_idle` can safely consult in-memory wait guards.
+    fn supports_idle_sweep(&self) -> bool {
+        false
+    }
+
     /// Deletes a stream and all of its durable state (events, publishes,
     /// publishers, claims, batches, batch_aliases, subscriptions, agent
     /// bindings, and stream_members).
     fn delete_stream(&mut self, name: &str) -> Result<DeletedStream, ToolError>;
+
+    /// Deletes an explicit user-requested stream if permitted by policy,
+    /// failing with `stream_not_found` if absent.
+    fn delete_stream_for_access(
+        &mut self,
+        name: &str,
+        access: &Access,
+        pinned_stream: Option<&str>,
+    ) -> Result<DeletedStream, ToolError>;
+
+    /// Atomically deletes the named streams permitted by policy, skipping absent
+    /// names and aborting without changes if any named stream is forbidden or invalid.
+    fn delete_streams(
+        &mut self,
+        names: &[String],
+        access: &Access,
+        pinned_stream: Option<&str>,
+    ) -> Result<(Vec<String>, Vec<DeletedStream>), ToolError>;
+
+    /// State-driven sweep of idle accessible streams (never time-based).
+    fn sweep_idle_streams(
+        &mut self,
+        access: &Access,
+        keep: &[String],
+        waiting: &HashSet<i64>,
+        pinned_stream: Option<&str>,
+    ) -> Result<(Vec<String>, Vec<DeletedStream>), ToolError>;
+
+    /// Atomically deletes multiple subscriptions on `stream`, skipping absent
+    /// labels and aborting without changes if any named label is pinned.
+    fn delete_subscriptions_bulk(
+        &mut self,
+        stream: &str,
+        access: &Access,
+        labels: &[String],
+        pinned_label: Option<&str>,
+    ) -> Result<(String, Vec<DeletedSubscription>), ToolError>;
+
+    /// State-driven sweep of idle subscriptions on `stream` (never time-based).
+    fn sweep_idle_subscriptions(
+        &mut self,
+        stream: &str,
+        access: &Access,
+        keep: &[String],
+        waiting: &HashSet<i64>,
+        pinned_label: Option<&str>,
+    ) -> Result<(String, Vec<DeletedSubscription>), ToolError>;
 
     /// Atomically verifies the expected active enrollment digest, provisions
     /// every bound channel in `channels`, and records `digest` as the active
@@ -273,11 +334,7 @@ pub trait QueueStore: Send {
 
     /// The pending batch exactly as the description shows it, or
     /// `{"status":"empty"}`. Seals nothing and records no attempt.
-    fn pending_description(
-        &mut self,
-        handle: &str,
-        access: &Access,
-    ) -> Result<Value, ToolError>;
+    fn pending_description(&mut self, handle: &str, access: &Access) -> Result<Value, ToolError>;
 }
 
 /// The queue's read-only discovery, served beside [`QueueStore`] so listings
@@ -765,6 +822,10 @@ impl QueueStore for Store {
         ))
     }
 
+    fn supports_idle_sweep(&self) -> bool {
+        true
+    }
+
     fn delete_subscription(
         &mut self,
         stream: &str,
@@ -787,32 +848,7 @@ impl QueueStore for Store {
                     format!("stream {stream:?} has no subscription labelled {label:?}"),
                 )
             })?;
-        let bound_agent: Option<String> = tx
-            .query_row(
-                "SELECT agent FROM agent_subscriptions WHERE subscription_id = ?1",
-                [subscription_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        tx.execute(
-            "DELETE FROM batch_aliases WHERE batch_row IN (
-                 SELECT id FROM batches WHERE subscription_id = ?1
-             )",
-            [subscription_id],
-        )?;
-        tx.execute(
-            "DELETE FROM batches WHERE subscription_id = ?1",
-            [subscription_id],
-        )?;
-        tx.execute(
-            "DELETE FROM agents WHERE subscription_id = ?1",
-            [subscription_id],
-        )?;
-        tx.execute(
-            "DELETE FROM agent_subscriptions WHERE subscription_id = ?1",
-            [subscription_id],
-        )?;
-        tx.execute("DELETE FROM subscriptions WHERE id = ?1", [subscription_id])?;
+        let bound_agent = delete_subscription_row_tx(&tx, subscription_id)?;
         tx.commit()?;
         Ok((
             SubscriptionResult::Deleted {
@@ -822,6 +858,103 @@ impl QueueStore for Store {
             subscription_id,
             bound_agent,
         ))
+    }
+
+    fn delete_subscriptions_bulk(
+        &mut self,
+        stream: &str,
+        access: &Access,
+        labels: &[String],
+        pinned_label: Option<&str>,
+    ) -> Result<(String, Vec<DeletedSubscription>), ToolError> {
+        let mut unique = Vec::new();
+        let mut seen = HashSet::new();
+        for label in labels {
+            if seen.insert(label.as_str()) {
+                unique.push(label.as_str());
+            }
+        }
+        let tx = self.write()?;
+        check_enrollment(&tx, access)?;
+        let stream_id = stream_id(&tx, stream)?;
+        check_access(&tx, stream_id, access)?;
+        let mut targets = Vec::new();
+        for label in unique {
+            policy::check_delete_subscription(stream, label, pinned_label)?;
+            let sub_id: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM subscriptions WHERE stream_id = ?1 AND label = ?2",
+                    params![stream_id, label],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(subscription_id) = sub_id {
+                targets.push((subscription_id, label.to_owned()));
+            }
+        }
+        let mut deleted = Vec::with_capacity(targets.len());
+        for (subscription_id, label) in targets {
+            let bound_agent = delete_subscription_row_tx(&tx, subscription_id)?;
+            deleted.push(DeletedSubscription {
+                subscription_id,
+                label,
+                bound_agent,
+            });
+        }
+        tx.commit()?;
+        Ok((stream.to_owned(), deleted))
+    }
+
+    fn sweep_idle_subscriptions(
+        &mut self,
+        stream: &str,
+        access: &Access,
+        keep: &[String],
+        waiting: &HashSet<i64>,
+        pinned_label: Option<&str>,
+    ) -> Result<(String, Vec<DeletedSubscription>), ToolError> {
+        let tx = self.write()?;
+        check_enrollment(&tx, access)?;
+        let stream_id = stream_id(&tx, stream)?;
+        check_access(&tx, stream_id, access)?;
+        let rows = {
+            let mut stmt = tx.prepare(
+                "SELECT s.id, s.label, a.agent
+                 FROM subscriptions s
+                 LEFT JOIN agent_subscriptions a ON a.subscription_id = s.id
+                 WHERE s.stream_id = ?1
+                 ORDER BY s.label ASC",
+            )?;
+            stmt.query_map([stream_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut deleted = Vec::new();
+        for (subscription_id, label, bound_agent) in rows {
+            let is_waiting = waiting.contains(&subscription_id);
+            let is_followed = bound_agent.is_some();
+            if policy::is_subscription_sweepable(
+                &label,
+                is_waiting,
+                is_followed,
+                keep,
+                pinned_label,
+            ) {
+                let bound_agent = delete_subscription_row_tx(&tx, subscription_id)?;
+                deleted.push(DeletedSubscription {
+                    subscription_id,
+                    label,
+                    bound_agent,
+                });
+            }
+        }
+        tx.commit()?;
+        Ok((stream.to_owned(), deleted))
     }
 
     /// Ensures `stream` exists (when unbound) and binds `agent_key` to its own
@@ -948,10 +1081,15 @@ impl QueueStore for Store {
             };
         match subscription {
             SubscriptionResult::Created { handle, .. }
-            | SubscriptionResult::Recovered { handle, .. } => Ok((stream_id, subscription_id, handle)),
-            SubscriptionResult::Deleted { .. } | SubscriptionResult::Listed { .. } => Err(
-                ToolError::internal("subscription creation returned an unexpected status"),
-            ),
+            | SubscriptionResult::Recovered { handle, .. } => {
+                Ok((stream_id, subscription_id, handle))
+            }
+            SubscriptionResult::Deleted { .. }
+            | SubscriptionResult::DeletedBulk { .. }
+            | SubscriptionResult::Swept { .. }
+            | SubscriptionResult::Listed { .. } => Err(ToolError::internal(
+                "subscription creation returned an unexpected status",
+            )),
         }
     }
 
@@ -966,65 +1104,132 @@ impl QueueStore for Store {
     fn delete_stream(&mut self, name: &str) -> Result<DeletedStream, ToolError> {
         let tx = self.write()?;
         let stream_id = stream_id(&tx, name)?;
-        let existing_members = {
-            let mut stmt =
-                tx.prepare("SELECT caller FROM stream_members WHERE stream_id = ?1")?;
-            stmt.query_map([stream_id], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?
-        };
+        let existing_members = stream_members_on(&tx, stream_id)?;
         policy::check_retire_channel(name, &existing_members)?;
-        let subscription_ids = {
-            let mut stmt = tx.prepare("SELECT id FROM subscriptions WHERE stream_id = ?1")?;
-            stmt.query_map([stream_id], |row| row.get::<_, i64>(0))?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let agent_keys = {
-            let mut stmt = tx.prepare(
-                "SELECT agent FROM agent_subscriptions
-                 WHERE subscription_id IN (SELECT id FROM subscriptions WHERE stream_id = ?1)",
-            )?;
-            stmt.query_map([stream_id], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        tx.execute(
-            "DELETE FROM batch_aliases WHERE batch_row IN (
-                 SELECT id FROM batches WHERE subscription_id IN (
-                     SELECT id FROM subscriptions WHERE stream_id = ?1
-                 )
-             )",
-            [stream_id],
-        )?;
-        tx.execute(
-            "DELETE FROM batches WHERE subscription_id IN (
-                 SELECT id FROM subscriptions WHERE stream_id = ?1
-             )",
-            [stream_id],
-        )?;
-        tx.execute(
-            "DELETE FROM agents WHERE subscription_id IN (
-                 SELECT id FROM subscriptions WHERE stream_id = ?1
-             )",
-            [stream_id],
-        )?;
-        tx.execute(
-            "DELETE FROM agent_subscriptions WHERE subscription_id IN (
-                 SELECT id FROM subscriptions WHERE stream_id = ?1
-             )",
-            [stream_id],
-        )?;
-        tx.execute("DELETE FROM subscriptions WHERE stream_id = ?1", [stream_id])?;
-        tx.execute("DELETE FROM claims WHERE stream_id = ?1", [stream_id])?;
-        tx.execute("DELETE FROM publishers WHERE stream_id = ?1", [stream_id])?;
-        tx.execute("DELETE FROM publishes WHERE stream_id = ?1", [stream_id])?;
-        tx.execute("DELETE FROM events WHERE stream_id = ?1", [stream_id])?;
-        tx.execute("DELETE FROM stream_members WHERE stream_id = ?1", [stream_id])?;
-        tx.execute("DELETE FROM streams WHERE id = ?1", [stream_id])?;
+        let deleted = delete_stream_row_tx(&tx, stream_id)?;
         tx.commit()?;
-        Ok(DeletedStream {
-            stream_id,
-            subscription_ids,
-            agent_keys,
-        })
+        Ok(deleted)
+    }
+
+    fn delete_stream_for_access(
+        &mut self,
+        name: &str,
+        access: &Access,
+        pinned_stream: Option<&str>,
+    ) -> Result<DeletedStream, ToolError> {
+        let tx = self.write()?;
+        check_enrollment(&tx, access)?;
+        policy::check_delete_stream_name(name, access, pinned_stream)?;
+        let stream_id = stream_id(&tx, name)?;
+        let raw_members = stream_members_on(&tx, stream_id)?;
+        let (has_channel_marker, members) = summarize_members(&raw_members, access);
+        policy::check_delete_stream(name, members, has_channel_marker, access, pinned_stream)?;
+        let deleted = delete_stream_row_tx(&tx, stream_id)?;
+        tx.commit()?;
+        Ok(deleted)
+    }
+
+    fn delete_streams(
+        &mut self,
+        names: &[String],
+        access: &Access,
+        pinned_stream: Option<&str>,
+    ) -> Result<(Vec<String>, Vec<DeletedStream>), ToolError> {
+        let mut unique = Vec::new();
+        let mut seen = HashSet::new();
+        for name in names {
+            if seen.insert(name.as_str()) {
+                unique.push(name.as_str());
+            }
+        }
+        let tx = self.write()?;
+        check_enrollment(&tx, access)?;
+        if !access.is_valid() || access.channel.is_some() {
+            return Err(policy::stream_forbidden(access));
+        }
+        let mut targets = Vec::new();
+        for name in unique {
+            policy::check_delete_stream_name(name, access, pinned_stream)?;
+            let sid: Option<i64> = tx
+                .query_row("SELECT id FROM streams WHERE name = ?1", [name], |row| {
+                    row.get(0)
+                })
+                .optional()?;
+            let Some(sid) = sid else {
+                continue;
+            };
+            let raw_members = stream_members_on(&tx, sid)?;
+            let (has_channel_marker, members) = summarize_members(&raw_members, access);
+            policy::check_delete_stream(name, members, has_channel_marker, access, pinned_stream)?;
+            targets.push((sid, name.to_owned()));
+        }
+        let mut deleted_names = Vec::with_capacity(targets.len());
+        let mut deleted_streams = Vec::with_capacity(targets.len());
+        for (sid, name) in targets {
+            deleted_streams.push(delete_stream_row_tx(&tx, sid)?);
+            deleted_names.push(name);
+        }
+        tx.commit()?;
+        Ok((deleted_names, deleted_streams))
+    }
+
+    fn sweep_idle_streams(
+        &mut self,
+        access: &Access,
+        keep: &[String],
+        waiting: &HashSet<i64>,
+        pinned_stream: Option<&str>,
+    ) -> Result<(Vec<String>, Vec<DeletedStream>), ToolError> {
+        let tx = self.write()?;
+        check_enrollment(&tx, access)?;
+        if !access.is_valid() {
+            return Err(policy::stream_forbidden(access));
+        }
+        let streams = {
+            let mut stmt = tx.prepare("SELECT id, name FROM streams ORDER BY name ASC")?;
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut deleted_names = Vec::new();
+        let mut deleted_streams = Vec::new();
+        for (sid, name) in streams {
+            if name == DEFAULT_STREAM || pinned_stream == Some(name.as_str()) {
+                continue;
+            }
+            let raw_members = stream_members_on(&tx, sid)?;
+            let (has_channel_marker, members) = summarize_members(&raw_members, access);
+            let subs = {
+                let mut stmt = tx.prepare(
+                    "SELECT s.id, a.subscription_id IS NOT NULL
+                     FROM subscriptions s
+                     LEFT JOIN agent_subscriptions a ON a.subscription_id = s.id
+                     WHERE s.stream_id = ?1",
+                )?;
+                stmt.query_map([sid], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+            };
+            let has_active_subscription = subs
+                .iter()
+                .any(|(sub_id, is_followed)| *is_followed || waiting.contains(sub_id));
+            if policy::is_stream_sweepable(
+                &name,
+                members,
+                has_channel_marker,
+                has_active_subscription,
+                access,
+                keep,
+                pinned_stream,
+            ) {
+                deleted_streams.push(delete_stream_row_tx(&tx, sid)?);
+                deleted_names.push(name);
+            }
+        }
+        tx.commit()?;
+        Ok((deleted_names, deleted_streams))
     }
 
     fn activate_enrollment(
@@ -1475,11 +1680,7 @@ impl QueueStore for Store {
     /// `{"status":"empty"}` when none is pending. Seals nothing from the
     /// backlog and records no delivery attempt: it reads only what a listing
     /// has already shown.
-    fn pending_description(
-        &mut self,
-        handle: &str,
-        access: &Access,
-    ) -> Result<Value, ToolError> {
+    fn pending_description(&mut self, handle: &str, access: &Access) -> Result<Value, ToolError> {
         self.read_batch(
             handle,
             access,
@@ -2203,6 +2404,121 @@ fn acknowledge_alias(
     ))
 }
 
+fn stream_members_on(conn: &Connection, stream_id: i64) -> Result<Vec<String>, ToolError> {
+    let mut stmt = conn.prepare("SELECT caller FROM stream_members WHERE stream_id = ?1")?;
+    Ok(stmt
+        .query_map([stream_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
+fn summarize_members(raw_members: &[String], access: &Access) -> (bool, Members) {
+    let has_channel_marker = raw_members.iter().any(|m| policy::is_channel_marker(m));
+    let key = policy::member_key(access);
+    let includes_caller = key
+        .as_deref()
+        .is_some_and(|caller| raw_members.iter().any(|m| m == caller));
+    (
+        has_channel_marker,
+        Members {
+            count: raw_members.len(),
+            includes_caller,
+        },
+    )
+}
+
+fn delete_subscription_row_tx(
+    tx: &Transaction<'_>,
+    subscription_id: i64,
+) -> Result<Option<String>, ToolError> {
+    let bound_agent: Option<String> = tx
+        .query_row(
+            "SELECT agent FROM agent_subscriptions WHERE subscription_id = ?1",
+            [subscription_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    tx.execute(
+        "DELETE FROM batch_aliases WHERE batch_row IN (
+             SELECT id FROM batches WHERE subscription_id = ?1
+         )",
+        [subscription_id],
+    )?;
+    tx.execute(
+        "DELETE FROM batches WHERE subscription_id = ?1",
+        [subscription_id],
+    )?;
+    tx.execute(
+        "DELETE FROM agents WHERE subscription_id = ?1",
+        [subscription_id],
+    )?;
+    tx.execute(
+        "DELETE FROM agent_subscriptions WHERE subscription_id = ?1",
+        [subscription_id],
+    )?;
+    tx.execute("DELETE FROM subscriptions WHERE id = ?1", [subscription_id])?;
+    Ok(bound_agent)
+}
+
+fn delete_stream_row_tx(tx: &Transaction<'_>, stream_id: i64) -> Result<DeletedStream, ToolError> {
+    let subscription_ids = {
+        let mut stmt = tx.prepare("SELECT id FROM subscriptions WHERE stream_id = ?1")?;
+        stmt.query_map([stream_id], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let agent_keys = {
+        let mut stmt = tx.prepare(
+            "SELECT agent FROM agent_subscriptions
+             WHERE subscription_id IN (SELECT id FROM subscriptions WHERE stream_id = ?1)",
+        )?;
+        stmt.query_map([stream_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    tx.execute(
+        "DELETE FROM batch_aliases WHERE batch_row IN (
+             SELECT id FROM batches WHERE subscription_id IN (
+                 SELECT id FROM subscriptions WHERE stream_id = ?1
+             )
+         )",
+        [stream_id],
+    )?;
+    tx.execute(
+        "DELETE FROM batches WHERE subscription_id IN (
+             SELECT id FROM subscriptions WHERE stream_id = ?1
+         )",
+        [stream_id],
+    )?;
+    tx.execute(
+        "DELETE FROM agents WHERE subscription_id IN (
+             SELECT id FROM subscriptions WHERE stream_id = ?1
+         )",
+        [stream_id],
+    )?;
+    tx.execute(
+        "DELETE FROM agent_subscriptions WHERE subscription_id IN (
+             SELECT id FROM subscriptions WHERE stream_id = ?1
+         )",
+        [stream_id],
+    )?;
+    tx.execute(
+        "DELETE FROM subscriptions WHERE stream_id = ?1",
+        [stream_id],
+    )?;
+    tx.execute("DELETE FROM claims WHERE stream_id = ?1", [stream_id])?;
+    tx.execute("DELETE FROM publishers WHERE stream_id = ?1", [stream_id])?;
+    tx.execute("DELETE FROM publishes WHERE stream_id = ?1", [stream_id])?;
+    tx.execute("DELETE FROM events WHERE stream_id = ?1", [stream_id])?;
+    tx.execute(
+        "DELETE FROM stream_members WHERE stream_id = ?1",
+        [stream_id],
+    )?;
+    tx.execute("DELETE FROM streams WHERE id = ?1", [stream_id])?;
+    Ok(DeletedStream {
+        stream_id,
+        subscription_ids,
+        agent_keys,
+    })
+}
+
 fn stream_id(conn: &Connection, name: &str) -> Result<i64, ToolError> {
     conn.query_row("SELECT id FROM streams WHERE name = ?1", [name], |row| {
         row.get(0)
@@ -2299,8 +2615,9 @@ mod tests {
             };
             let access = Access::default();
             store.create_stream("orders", &access, None).unwrap();
-            let (SubscriptionResult::Created { handle, .. }, _, _) =
-                store.create_subscription("orders", "reader", &access).unwrap()
+            let (SubscriptionResult::Created { handle, .. }, _, _) = store
+                .create_subscription("orders", "reader", &access)
+                .unwrap()
             else {
                 panic!("created subscription");
             };
@@ -2328,7 +2645,9 @@ mod tests {
                 panic!("sealed batch");
             };
             if delete {
-                store.delete_subscription("orders", &access, "reader").unwrap();
+                store
+                    .delete_subscription("orders", &access, "reader")
+                    .unwrap();
             } else {
                 store.admit(&handle, &access, None, true).unwrap();
             }

@@ -13,11 +13,12 @@ use minymaton_core::api::{
     ReceiveResult, StreamArgs, StreamResult, SubscriptionArgs, SubscriptionResult,
 };
 use minymaton_core::{
-    Access, Admitted, Delivery, ErrorCode, INBOX_PREFIX, Queue, ToolError, agent_key,
+    Access, Admitted, Delivery, ErrorCode, INBOX_PREFIX, OutputFormat, Queue, ToolError, agent_key,
+    stream_to_string, subscription_to_string,
 };
 use rmcp::handler::server::common::{schema_for_input, schema_for_output};
 use rmcp::model::{
-    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, Extensions,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Extensions,
     Implementation, ListResourceTemplatesResult, ListToolsResult, PaginatedRequestParams,
     ProgressNotificationParam, ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse,
     ResourceTemplate, ResourceUpdatedNotificationParam, ServerCapabilities, ServerConfig,
@@ -254,12 +255,12 @@ impl Minymaton {
         }
         let default_stream = self.bound_channel.as_deref().unwrap_or("agents");
         let mut out = format!(
-            "minymaton is a durable event-driven message queue (registered tools on this endpoint: {}). For agent coordination use the existing {default_stream} stream unless the user names another; do not create a separate coordination stream. stream action list discovers streams; subscription action list is the live roster, returning each subscription's label, handle, waiting status, last_active_at, and metadata. waiting is a point-in-time, process-local observation of a receive wait guard, not a durable reservation or proof the remote client is alive. ",
+            "minymaton is a durable event-driven message queue (registered tools on this endpoint: {}). For agent coordination use the existing {default_stream} stream unless the user names another; do not create a separate coordination stream. stream action list discovers streams, and delete, delete_bulk, or state-driven sweep_idle remove unused streams without time-based heuristics. subscription action list is the live roster, returning each subscription's label, handle, waiting status, last_active_at, and metadata; delete, delete_bulk, or state-driven sweep_idle remove unused subscriptions while protecting active wait guards, pinned --description-* rows, and keep lists. waiting is a point-in-time, process-local observation of a receive wait guard, not a durable reservation or proof the remote client is alive; an agent between minymaton-wait runs should pass keep if sweeping live. ",
             names.join(", ")
         );
         if self.agent_route {
             out.push_str(&format!(
-                "This agent endpoint binds its tool list to a subscription so pending batches arrive directly in the refreshed tool list instead of a receive loop. Call follow with stream (use {default_stream} for agent coordination unless the user names another) to bind this endpoint to its own subscription; do not create a duplicate subscription or recover another agent's label, and use subscription action delete when retiring your own subscription. After obtaining your handle from follow, do one receive with max_events 1, max_bytes 16384, wait false as a health check, reporting any failure immediately and acknowledging any returned batch. ",
+                "This agent endpoint binds its tool list to a subscription so pending batches arrive directly in the refreshed tool list instead of a receive loop. Call follow with stream (use {default_stream} for agent coordination unless the user names another) to bind this endpoint to its own subscription (follow bindings are protected during sweep_idle); do not create a duplicate subscription or recover another agent's label, and use subscription action delete when retiring your own subscription. After obtaining your handle from follow, do one receive with max_events 1, max_bytes 16384, wait false as a health check, reporting any failure immediately and acknowledging any returned batch. ",
             ));
         } else if let Some(spec) = &self.description {
             let stream = self
@@ -345,8 +346,8 @@ impl Minymaton {
             Admitted::Done(result) => Ok(result),
             Admitted::Waiting(waiter) => {
                 let auth = Arc::clone(&self.auth);
-                let waiter = waiter
-                    .with_access_refresh(Arc::new(move |access| auth.refresh_access(access)));
+                let waiter =
+                    waiter.with_access_refresh(Arc::new(move |access| auth.refresh_access(access)));
                 let waiting = async {
                     if let Some(token) = context.meta.get_progress_token() {
                         let progress =
@@ -746,11 +747,38 @@ impl ServerHandler for Minymaton {
         };
         let outcome = match name {
             "stream" => match self.access(&context.extensions) {
-                Ok(access) => self.queue.stream(arguments, &access).await,
+                Ok(access) => match serde_json::from_value::<StreamArgs>(arguments) {
+                    Ok(args) => {
+                        match stream_to_string(&self.queue, args, &access, OutputFormat::Json).await
+                        {
+                            Ok(rendered) => {
+                                return Ok(CallToolResponse::Complete(rendered_tool_result(
+                                    rendered,
+                                )));
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Err(error) => Err(ToolError::invalid(format!("invalid arguments: {error}"))),
+                },
                 Err(error) => Err(error),
             },
             "subscription" => match self.access(&context.extensions) {
-                Ok(access) => self.queue.subscription(arguments, &access).await,
+                Ok(access) => match serde_json::from_value::<SubscriptionArgs>(arguments) {
+                    Ok(args) => {
+                        match subscription_to_string(&self.queue, args, &access, OutputFormat::Json)
+                            .await
+                        {
+                            Ok(rendered) => {
+                                return Ok(CallToolResponse::Complete(rendered_tool_result(
+                                    rendered,
+                                )));
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Err(error) => Err(ToolError::invalid(format!("invalid arguments: {error}"))),
+                },
                 Err(error) => Err(error),
             },
             "publish" => match self.access(&context.extensions) {
@@ -800,15 +828,22 @@ impl ServerHandler for Minymaton {
     }
 }
 
+fn rendered_tool_result(rendered: String) -> CallToolResult {
+    let value: Value = serde_json::from_str(&rendered).expect("rendered tool JSON always parses");
+    let mut result = CallToolResult::structured(value);
+    result.content = vec![ContentBlock::text(rendered)];
+    result
+}
+
 fn tools() -> Vec<Tool> {
     vec![
         tool::<StreamArgs, StreamResult>(
             "stream",
-            "List the streams you may use (action \"list\", optional after and limit, at most 100 per page), or explicitly create a named stream (action \"create\", name). Join the existing agents stream unless the user names another; do not create a private coordination stream. A sensitive ask goes on a private stream: action \"create\" with members (callers enrolled with the server's bearer tokens; you are added) admits only those callers, and any member can admit or remove a caller with action \"grant\" or \"revoke\" (name, caller). Every other caller is refused with stream_forbidden.",
+            "List the streams you may use (action \"list\", optional after and limit, at most 100 per page), explicitly create a named stream (action \"create\", name), or clean up streams with \"delete\" (name), \"delete_bulk\" (names), or state-driven \"sweep_idle\" (optional keep; never time-based). sweep_idle deletes accessible idle streams while protecting agents, bound channels, --description-stream, inaccessible private streams, keep, and streams with active waiting:true or follow-bound subscriptions. Join the existing agents stream unless the user names another; do not create a private coordination stream. A sensitive ask goes on a private stream: action \"create\" with members (callers enrolled with the server's bearer tokens; you are added) admits only those callers, and any member can admit or remove a caller with action \"grant\" or \"revoke\" (name, caller). Every other caller is refused with stream_forbidden.",
         ),
         tool::<SubscriptionArgs, SubscriptionResult>(
             "subscription",
-            "Join or manage a subscription on an existing stream (defaults to agents). action \"create\" uses your assigned label, or omit label to atomically claim the smallest free agent-N (optional start_at: \"latest\" or \"earliest\", and optional metadata object such as {\"harness\": \"...\", \"model\": \"...\", \"host\": \"...\"}). Never recover another agent's subscription. action \"recover\" requires your own label (optional metadata updates stored identity). action \"delete\" removes a retired subscription and frees its label. action \"list\" lists labels, handles, waiting status, last_active_at, and metadata, with optional after and limit (1 to 100). waiting is a point-in-time, process-local observation, not a durable reservation or remote-client liveness guarantee. After joining and before launching a waiter, call receive once with wait:false as a health check; report a failure immediately rather than retrying.",
+            "Join or manage a subscription on an existing stream (defaults to agents). action \"create\" uses your assigned label, or omit label to atomically claim the smallest free agent-N (optional start_at: \"latest\" or \"earliest\", and optional metadata object such as {\"harness\": \"...\", \"model\": \"...\", \"host\": \"...\"}). Never recover another agent's subscription. action \"recover\" requires your own label (optional metadata updates stored identity). action \"delete\" removes a retired subscription and frees its label; \"delete_bulk\" (labels) atomically removes multiple labels; state-driven \"sweep_idle\" (optional keep; never time-based) deletes idle subscriptions while protecting waiting:true guards, follow bindings, --description-subscription, and keep. action \"list\" lists labels, handles, waiting status, last_active_at, and metadata, with optional after and limit (1 to 100). waiting is a point-in-time, process-local observation, not a durable reservation or remote-client liveness guarantee; an agent between minymaton-wait runs without follow should pass keep or use follow if sweeping live. After joining and before launching a waiter, call receive once with wait:false as a health check; report a failure immediately rather than retrying.",
         ),
         tool::<PublishArgs, PublishResult>(
             "publish",
@@ -1050,15 +1085,17 @@ impl ToolListWatcher {
     ) -> Result<Option<Binding>, ToolError> {
         if let Some(agent_name) = agent {
             match queue.agent_binding_raw(agent_name, access).await {
-                Ok(raw) => Ok(raw.map(
-                    |(stream_id, subscription_id, stream, label, handle)| Binding {
-                        stream_id,
-                        subscription_id,
-                        stream,
-                        label,
-                        handle,
-                    },
-                )),
+                Ok(raw) => {
+                    Ok(raw.map(
+                        |(stream_id, subscription_id, stream, label, handle)| Binding {
+                            stream_id,
+                            subscription_id,
+                            stream,
+                            label,
+                            handle,
+                        },
+                    ))
+                }
                 Err(error) if error.code == ErrorCode::AuthorityFenced => Err(error),
                 Err(error) => {
                     eprintln!(
@@ -1072,7 +1109,10 @@ impl ToolListWatcher {
             let Some(channel) = &access.channel else {
                 return Ok(Some(spec.default_binding.clone()));
             };
-            match queue.prepare_description(channel, &spec.label, access).await {
+            match queue
+                .prepare_description(channel, &spec.label, access)
+                .await
+            {
                 Ok((stream_id, subscription_id, handle)) => Ok(Some(Binding {
                     stream_id,
                     subscription_id,

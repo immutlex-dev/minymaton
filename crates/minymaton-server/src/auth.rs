@@ -228,7 +228,10 @@ impl BearerAuthenticator {
     #[cfg(unix)]
     pub(crate) fn check_reload_transition(&self, next: &Self) -> Result<(), String> {
         for prev in &self.entries {
-            if let Some(retained) = next.entries.iter().find(|entry| entry.digest == prev.digest)
+            if let Some(retained) = next
+                .entries
+                .iter()
+                .find(|entry| entry.digest == prev.digest)
                 && (retained.caller != prev.caller || retained.channel != prev.channel)
             {
                 return Err(format!(

@@ -36,14 +36,32 @@ async fn action_schemas_are_flat_and_requests_remain_strict() {
     for (name, actions, fields) in [
         (
             "stream",
-            json!(["create", "grant", "revoke", "list"]),
-            vec!["action", "name", "members", "caller", "after", "limit"],
+            json!([
+                "create",
+                "grant",
+                "revoke",
+                "delete",
+                "delete_bulk",
+                "sweep_idle",
+                "list"
+            ]),
+            vec![
+                "action", "name", "members", "caller", "names", "keep", "after", "limit",
+            ],
         ),
         (
             "subscription",
-            json!(["create", "recover", "delete", "list"]),
+            json!([
+                "create",
+                "recover",
+                "delete",
+                "delete_bulk",
+                "sweep_idle",
+                "list"
+            ]),
             vec![
-                "action", "stream", "label", "start_at", "metadata", "after", "limit",
+                "action", "stream", "label", "start_at", "metadata", "labels", "keep", "after",
+                "limit",
             ],
         ),
     ] {
@@ -91,8 +109,11 @@ async fn action_schemas_are_flat_and_requests_remain_strict() {
 
     for (tool, args, missing) in [
         ("stream", json!({"action": "create"}), "name"),
+        ("stream", json!({"action": "delete"}), "name"),
+        ("stream", json!({"action": "delete_bulk"}), "names"),
         ("subscription", json!({"action": "recover"}), "label"),
         ("subscription", json!({"action": "delete"}), "label"),
+        ("subscription", json!({"action": "delete_bulk"}), "labels"),
     ] {
         let error = client.call(tool, args).await.err();
         assert_eq!(error["code"], "invalid_arguments");

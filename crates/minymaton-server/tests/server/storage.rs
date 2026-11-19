@@ -11,9 +11,9 @@ use minymaton_core::api::{
     AckOutcome, ReceiveResult, StartAt, StreamResult, SubscriptionResult, WaitEnd, WaitReport,
 };
 use minymaton_core::{
-    Access, Admission, Admitted, AgentBindingRow, Batch, Bounds, DeletedStream, Delivery,
-    ErrorCode, Membership, Publication, Published, Queue, QueueReader, QueueStore, Reader,
-    Selection, Store, ToolError, inbox_uri,
+    Access, Admission, Admitted, AgentBindingRow, Batch, Bounds, DeletedStream,
+    DeletedSubscription, Delivery, ErrorCode, Membership, Publication, Published, Queue,
+    QueueReader, QueueStore, Reader, Selection, Store, ToolError, inbox_uri,
 };
 use rmcp::model::{ReadResourceResult, RequestId};
 use serde_json::{Value, json};
@@ -582,6 +582,10 @@ impl QueueStore for RecordingStore {
             .recover_subscription(stream, access, label, metadata)
     }
 
+    fn supports_idle_sweep(&self) -> bool {
+        self.inner.supports_idle_sweep()
+    }
+
     fn delete_subscription(
         &mut self,
         stream: &str,
@@ -590,6 +594,31 @@ impl QueueStore for RecordingStore {
     ) -> Result<(SubscriptionResult, i64, Option<String>), ToolError> {
         self.record("delete_subscription");
         self.inner.delete_subscription(stream, access, label)
+    }
+
+    fn delete_subscriptions_bulk(
+        &mut self,
+        stream: &str,
+        access: &Access,
+        labels: &[String],
+        pinned_label: Option<&str>,
+    ) -> Result<(String, Vec<DeletedSubscription>), ToolError> {
+        self.record("delete_subscriptions_bulk");
+        self.inner
+            .delete_subscriptions_bulk(stream, access, labels, pinned_label)
+    }
+
+    fn sweep_idle_subscriptions(
+        &mut self,
+        stream: &str,
+        access: &Access,
+        keep: &[String],
+        waiting: &HashSet<i64>,
+        pinned_label: Option<&str>,
+    ) -> Result<(String, Vec<DeletedSubscription>), ToolError> {
+        self.record("sweep_idle_subscriptions");
+        self.inner
+            .sweep_idle_subscriptions(stream, access, keep, waiting, pinned_label)
     }
 
     fn follow_stream(
@@ -621,6 +650,39 @@ impl QueueStore for RecordingStore {
     fn delete_stream(&mut self, stream: &str) -> Result<DeletedStream, ToolError> {
         self.record("delete_stream");
         self.inner.delete_stream(stream)
+    }
+
+    fn delete_stream_for_access(
+        &mut self,
+        name: &str,
+        access: &Access,
+        pinned_stream: Option<&str>,
+    ) -> Result<DeletedStream, ToolError> {
+        self.record("delete_stream_for_access");
+        self.inner
+            .delete_stream_for_access(name, access, pinned_stream)
+    }
+
+    fn delete_streams(
+        &mut self,
+        names: &[String],
+        access: &Access,
+        pinned_stream: Option<&str>,
+    ) -> Result<(Vec<String>, Vec<DeletedStream>), ToolError> {
+        self.record("delete_streams");
+        self.inner.delete_streams(names, access, pinned_stream)
+    }
+
+    fn sweep_idle_streams(
+        &mut self,
+        access: &Access,
+        keep: &[String],
+        waiting: &HashSet<i64>,
+        pinned_stream: Option<&str>,
+    ) -> Result<(Vec<String>, Vec<DeletedStream>), ToolError> {
+        self.record("sweep_idle_streams");
+        self.inner
+            .sweep_idle_streams(access, keep, waiting, pinned_stream)
     }
 
     fn activate_enrollment(

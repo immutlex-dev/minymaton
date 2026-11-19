@@ -1,0 +1,42 @@
+[package]
+name = "minymaton-mobile-core"
+version.workspace = true
+description = "The Rust core of the minymaton mobile apps: a sessionless MCP client, on-device SQLite storage and cancellable receive waits, exposed through JNI and C FFI"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+readme = "../../README.md"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["network-programming", "asynchronous"]
+publish = false
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+minymaton-core = { path = "../minymaton-core", version = "0.1.6" }
+bytes = "1"
+getrandom = "0.3"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+rmcp = { version = ">=3.7.0", default-features = false }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-util = "0.7"
+url = "2"
+webpki-roots = "1"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
+[dev-dependencies]
+minymaton-server = { path = "../minymaton-server" }
+rcgen = "0.14"
+tempfile = "3"

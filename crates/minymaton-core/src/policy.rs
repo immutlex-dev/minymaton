@@ -154,6 +154,11 @@ pub fn channel_marker(channel: &str) -> String {
     format!("{CHANNEL_MARKER_PREFIX}{channel}")
 }
 
+/// Whether `member` is an internal bound-channel marker or retirement tombstone.
+pub fn is_channel_marker(member: &str) -> bool {
+    member.starts_with(CHANNEL_MARKER_PREFIX)
+}
+
 /// The membership key checked in `stream_members` / `member:<stream_id>:<key>`
 /// for `access`. Returns `None` if `access` is unauthenticated or invalid.
 pub fn member_key(access: &Access) -> Option<String> {
@@ -354,7 +359,8 @@ pub fn check_event_budget(
     retained_events: usize,
     limits: Limits,
 ) -> Result<(), ToolError> {
-    if access.channel.is_some() && (retained_events as u64) >= limits.max_retained_events_per_channel
+    if access.channel.is_some()
+        && (retained_events as u64) >= limits.max_retained_events_per_channel
     {
         return Err(ToolError::new(
             ErrorCode::StorageFull,
@@ -417,10 +423,7 @@ pub fn check_enrollment_transition(
 /// carries an expected `enrollment_digest` from its authenticating gateway,
 /// the storage transaction verifies that the stored active enrollment digest
 /// matches before reading or committing state.
-pub fn check_active_enrollment(
-    stored: Option<[u8; 32]>,
-    access: &Access,
-) -> Result<(), ToolError> {
+pub fn check_active_enrollment(stored: Option<[u8; 32]>, access: &Access) -> Result<(), ToolError> {
     if let Some(expected) = access.enrollment_digest
         && stored != Some(expected)
     {
@@ -485,6 +488,92 @@ pub(crate) fn stream_forbidden(access: &Access) -> ToolError {
             }
         },
     )
+}
+
+/// Validates that `access` may attempt explicit stream deletion on `name`
+/// before inspecting storage.
+pub fn check_delete_stream_name(
+    name: &str,
+    access: &Access,
+    pinned_stream: Option<&str>,
+) -> Result<(), ToolError> {
+    if !access.is_valid() || access.channel.is_some() {
+        return Err(stream_forbidden(access));
+    }
+    if name == DEFAULT_STREAM {
+        return Err(ToolError::invalid(format!(
+            "cannot delete default stream {DEFAULT_STREAM:?}"
+        )));
+    }
+    if pinned_stream == Some(name) {
+        return Err(ToolError::invalid(format!(
+            "cannot delete stream {name:?}: it is pinned by --description-stream"
+        )));
+    }
+    Ok(())
+}
+
+/// Validates explicit deletion of an existing stream `name` by `access`.
+pub fn check_delete_stream(
+    name: &str,
+    members: Members,
+    has_channel_marker: bool,
+    access: &Access,
+    pinned_stream: Option<&str>,
+) -> Result<(), ToolError> {
+    check_delete_stream_name(name, access, pinned_stream)?;
+    if has_channel_marker {
+        return Err(ToolError::invalid(format!(
+            "stream {name:?} is a bound channel; retire bound channels with --retire-channel"
+        )));
+    }
+    admit(members, access)
+}
+
+/// State-driven eligibility for `stream` `sweep_idle` (never time-based).
+pub fn is_stream_sweepable(
+    name: &str,
+    members: Members,
+    has_channel_marker: bool,
+    has_active_subscription: bool,
+    access: &Access,
+    keep: &[String],
+    pinned_stream: Option<&str>,
+) -> bool {
+    name != DEFAULT_STREAM
+        && pinned_stream != Some(name)
+        && !keep.iter().any(|kept| kept == name)
+        && !has_channel_marker
+        && listed(members, access)
+        && !has_active_subscription
+}
+
+/// Rejects explicit deletion of a `--description-subscription` pinned label.
+pub fn check_delete_subscription(
+    stream: &str,
+    label: &str,
+    pinned_label: Option<&str>,
+) -> Result<(), ToolError> {
+    if pinned_label == Some(label) {
+        return Err(ToolError::invalid(format!(
+            "cannot delete subscription {label:?} on stream {stream:?}: it is pinned by --description-subscription"
+        )));
+    }
+    Ok(())
+}
+
+/// State-driven eligibility for `subscription` `sweep_idle` (never time-based).
+pub fn is_subscription_sweepable(
+    label: &str,
+    is_waiting: bool,
+    is_followed: bool,
+    keep: &[String],
+    pinned_label: Option<&str>,
+) -> bool {
+    !is_waiting
+        && !is_followed
+        && pinned_label != Some(label)
+        && !keep.iter().any(|kept| kept == label)
 }
 
 pub(crate) fn private_stream_needs_auth() -> ToolError {

@@ -2,7 +2,10 @@
 //! loopback interface only.
 
 mod auth;
+mod cli;
 mod http;
+#[doc(hidden)]
+pub mod mcp_http;
 mod request_log;
 mod tools;
 
@@ -51,7 +54,32 @@ pub async fn serve(listener: tokio::net::TcpListener, queue: Queue) -> std::io::
 /// Runs the server until it fails. Once it is accepting connections it prints
 /// `listening on http://ADDRESS/mcp` as its first line on standard output.
 pub async fn run(arguments: impl IntoIterator<Item = String>) -> Result<(), String> {
-    let options = match Options::parse(arguments)? {
+    run_with(arguments, None).await
+}
+
+/// Serves with the same command-line `arguments` as [`run`], on a loopback
+/// listener the caller has already bound. The listener's address replaces the
+/// `--listen` option, so the caller knows the endpoint before serving starts.
+pub async fn run_on(
+    listener: tokio::net::TcpListener,
+    arguments: impl IntoIterator<Item = String>,
+) -> Result<(), String> {
+    run_with(arguments, Some(listener)).await
+}
+
+async fn run_with(
+    arguments: impl IntoIterator<Item = String>,
+    bound: Option<tokio::net::TcpListener>,
+) -> Result<(), String> {
+    let args: Vec<String> = arguments.into_iter().collect();
+    if bound.is_none()
+        && args
+            .first()
+            .is_some_and(|arg| arg == "stream" || arg == "subscription")
+    {
+        return cli::run(args).await;
+    }
+    let options = match Options::parse(args)? {
         Command::Serve(options) => options,
         Command::RetireChannel { channel, db } => {
             return retire_channel(channel, db).await;
@@ -65,10 +93,15 @@ pub async fn run(arguments: impl IntoIterator<Item = String>) -> Result<(), Stri
             return activate_enrollment(token_file, expected_digest, limits, db).await;
         }
     };
-    if !options.listen.ip().is_loopback() {
+    let listen = match &bound {
+        Some(listener) => listener
+            .local_addr()
+            .map_err(|error| format!("cannot read the listening address: {error}"))?,
+        None => options.listen,
+    };
+    if !listen.ip().is_loopback() {
         return Err(format!(
-            "refusing to listen on {}: this server only listens on the loopback interface (127.0.0.1)",
-            options.listen
+            "refusing to listen on {listen}: this server only listens on the loopback interface (127.0.0.1)"
         ));
     }
     let bearer_auth = options
@@ -101,11 +134,7 @@ pub async fn run(arguments: impl IntoIterator<Item = String>) -> Result<(), Stri
             .enrollment_digest_blocking()
             .map_err(|error| format!("cannot read enrollment digest: {}", error.message))?;
         queue
-            .activate_enrollment_blocking(
-                auth.bound_channels(),
-                auth.enrollment_digest(),
-                active,
-            )
+            .activate_enrollment_blocking(auth.bound_channels(), auth.enrollment_digest(), active)
             .map_err(|error| format!("cannot provision bound channels: {}", error.message))?;
     }
     let request_log = options
@@ -154,9 +183,12 @@ pub async fn run(arguments: impl IntoIterator<Item = String>) -> Result<(), Stri
             Arc::clone(&auth_controller),
         )?;
     }
-    let listener = tokio::net::TcpListener::bind(options.listen)
-        .await
-        .map_err(|error| format!("cannot listen on {}: {error}", options.listen))?;
+    let listener = match bound {
+        Some(listener) => listener,
+        None => tokio::net::TcpListener::bind(listen)
+            .await
+            .map_err(|error| format!("cannot listen on {listen}: {error}"))?,
+    };
     let address = listener
         .local_addr()
         .map_err(|error| format!("cannot read the listening address: {error}"))?;
@@ -402,7 +434,9 @@ impl Options {
                         format!("--max-retained-events-per-channel {value:?} is invalid: {error}")
                     })?;
                     if n == 0 {
-                        return Err("--max-retained-events-per-channel must be at least 1".to_owned());
+                        return Err(
+                            "--max-retained-events-per-channel must be at least 1".to_owned()
+                        );
                     }
                     limits.max_retained_events_per_channel = n;
                 }
@@ -444,10 +478,14 @@ impl Options {
                 }
                 "--max-concurrent-requests-per-principal" => {
                     let n = value.parse::<usize>().map_err(|error| {
-                        format!("--max-concurrent-requests-per-principal {value:?} is invalid: {error}")
+                        format!(
+                            "--max-concurrent-requests-per-principal {value:?} is invalid: {error}"
+                        )
                     })?;
                     if n == 0 {
-                        return Err("--max-concurrent-requests-per-principal must be at least 1".to_owned());
+                        return Err(
+                            "--max-concurrent-requests-per-principal must be at least 1".to_owned()
+                        );
                     }
                     max_concurrent_requests_per_principal = n;
                 }
